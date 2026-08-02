@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 from config import settings
 from services.ocr_service import process_captcha_ocr
+from services.banner_sso_service import banner_sso_service
 
 ACTIVE_SESSIONS: dict[str, requests.Session] = {}
 
@@ -12,52 +13,29 @@ class CampusScraperService:
         self.captcha_url = settings.CAPTCHA_URL
         self.notas_url = settings.NOTAS_URL
 
-    def initialize_login_session(self) -> tuple[requests.Session, dict, bytes]:
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
-        
-        response = session.get(self.login_url)
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        viewstate = soup.find("input", {"id": "__VIEWSTATE"})
-        eventvalidation = soup.find("input", {"id": "__EVENTVALIDATION"})
-        viewstategenerator = soup.find("input", {"id": "__VIEWSTATEGENERATOR"})
-        
-        form_data = {
-            "__VIEWSTATE": viewstate.get("value", "") if viewstate else "",
-            "__EVENTVALIDATION": eventvalidation.get("value", "") if eventvalidation else "",
-            "__VIEWSTATEGENERATOR": viewstategenerator.get("value", "") if viewstategenerator else "",
-        }
-        
-        # Petición al captcha agregando el header Referer correcto
-        captcha_res = session.get(
-            self.captcha_url,
-            headers={"Referer": self.login_url}
-        )
-        captcha_bytes = captcha_res.content
-        content_type = captcha_res.headers.get("Content-Type", "")
-        
-        print(f"[Backend Log] GET Captcha -> HTTP Status: {captcha_res.status_code}")
-        print(f"[Backend Log] GET Captcha -> Content-Type: {content_type}")
-        print(f"[Backend Log] GET Captcha -> Tamaño de bytes: {len(captcha_bytes)}")
-
-        # Guardar en archivo local temporal para depuración visual directa
-        debug_filename = "debug_captcha.png" if "image" in content_type.lower() else "debug_captcha.html"
-        try:
-            with open(debug_filename, "wb") as f:
-                f.write(captcha_bytes)
-            print(f"[Backend Log] Archivo local de depuración guardado en: {debug_filename}")
-        except Exception as e:
-            print(f"[Backend Warning] No se pudo guardar {debug_filename}: {e}")
-
-        if "image" not in content_type.lower():
-            print(f"[Backend CRÍTICO] La URL del captcha devolvió {content_type} en vez de imagen! Primeros 200 caracteres:\n{captcha_bytes[:200].decode('utf-8', errors='ignore')}")
-
-        return session, form_data, captcha_bytes
-
     def login(self, username: str, password: str, manual_captcha: str | None = None) -> dict:
+        """
+        Método unificado de login:
+        1. Intenta primero el nuevo flujo oficial Ellucian Banner SSB (SSO sin Captcha).
+        2. Si falla o está en mantenimiento, intenta el flujo legado ASP.NET WebForms con OCR.
+        """
+        print(f"[Scraper] Intentando inicio de sesión vía Banner SSB SSO para usuario: {username}")
+        success, msg, session = banner_sso_service.login_sso(username, password)
+
+        if success and session is not None:
+            token = f"sess_{username}_{base64.b64encode(username.encode()).decode()[:10]}"
+            ACTIVE_SESSIONS[token] = session
+            return {
+                "success": True,
+                "token": token,
+                "necesita_captcha": False,
+                "message": "Login SSO exitoso sin captcha."
+            }
+
+        print(f"[Scraper] SSO falló ('{msg}'). Intentando fallback legado ASP.NET WebForms con OCR...")
+        return self._login_legacy(username, password, manual_captcha)
+
+    def _login_legacy(self, username: str, password: str, manual_captcha: str | None = None) -> dict:
         session, form_fields, captcha_bytes = self.initialize_login_session()
         
         captcha_code = manual_captcha
@@ -66,7 +44,6 @@ class CampusScraperService:
             
         if not captcha_code:
             img_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
-            print(f"[Backend Log] OCR falló. Retornando fallback base64 con {len(captcha_bytes)} bytes de imagen (String Base64: {len(img_b64)} chars).")
             return {
                 "success": False,
                 "necesita_captcha": True,
@@ -91,14 +68,12 @@ class CampusScraperService:
                 "success": True,
                 "token": token,
                 "necesita_captcha": False,
-                "message": "Login exitoso"
+                "message": "Login legado exitoso."
             }
         else:
-            # Re-solicitar un captcha FRESCO para el nuevo intento si el POST falló
             try:
                 fresh_captcha = session.get(self.captcha_url, headers={"Referer": self.login_url}).content
                 fresh_b64 = base64.b64encode(fresh_captcha).decode("utf-8")
-                print(f"[Backend Log] POST Login rechazado. Obtenida nueva imagen fresca ({len(fresh_captcha)} bytes). String Base64: {len(fresh_b64)} chars.")
             except Exception:
                 fresh_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
 
@@ -109,11 +84,45 @@ class CampusScraperService:
                 "message": "Código o credenciales incorrectos."
             }
 
+    def initialize_login_session(self) -> tuple[requests.Session, dict, bytes]:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        
+        response = session.get(self.login_url)
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        viewstate = soup.find("input", {"id": "__VIEWSTATE"})
+        eventvalidation = soup.find("input", {"id": "__EVENTVALIDATION"})
+        viewstategenerator = soup.find("input", {"id": "__VIEWSTATEGENERATOR"})
+        
+        form_data = {
+            "__VIEWSTATE": viewstate.get("value", "") if viewstate else "",
+            "__EVENTVALIDATION": eventvalidation.get("value", "") if eventvalidation else "",
+            "__VIEWSTATEGENERATOR": viewstategenerator.get("value", "") if viewstategenerator else "",
+        }
+        
+        captcha_res = session.get(self.captcha_url, headers={"Referer": self.login_url})
+        captcha_bytes = captcha_res.content
+        
+        return session, form_data, captcha_bytes
+
     def get_notas(self, token: str, periodo: str, carrera: str) -> dict:
         session = ACTIVE_SESSIONS.get(token)
         if not session:
             return {"error": "Sesión no encontrada o expirada. Vuelva a iniciar sesión."}
 
+        # Probar primero la extracción JSON de Banner SSB
+        banner_json = banner_sso_service.get_student_grades_json(session, term=periodo)
+        if banner_json.get("success"):
+            return {
+                "periodo": periodo,
+                "carrera": carrera,
+                "cursos": banner_json.get("data", [])
+            }
+
+        # Fallback a scraping HTML tradicional de notas
         res = session.get(self.notas_url)
         soup = BeautifulSoup(res.text, "html.parser")
         
