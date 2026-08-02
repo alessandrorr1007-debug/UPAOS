@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from config import settings
-from database import get_db, UserSetting, encrypt_password, decrypt_password
+from database import get_db, UserSetting, Notificacion, encrypt_password, decrypt_password
 from services.scraper_service import scraper_service, ACTIVE_SESSIONS
 from services.banner_sso_service import banner_sso_service
 from services.notification_service import notification_service
@@ -201,6 +201,8 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Error al consultar cursos en Banner"))
 
+    # Momento en que Banner respondió (la app lo muestra como "Actualizado hace X").
+    ultima_actualizacion = datetime.now().isoformat()
     raw_cursos = result.get("cursos", [])
     normalized_cursos = []
 
@@ -231,6 +233,7 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
     response_data = {
         "periodo": req.periodo,
         "carrera": req.carrera,
+        "ultima_actualizacion": ultima_actualizacion,
         "cursos": normalized_cursos,
         "totalCount": len(normalized_cursos),
         "promedio_general": promedio_general,
@@ -325,14 +328,70 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
     user.ultima_revision = datetime.now()
     db.commit()
 
-    if cambios and user.fcm_token and notification_service.initialized:
-        notification_service.send_push_notification(
-            token=user.fcm_token,
-            title="Notas Actualizadas UPAO",
-            body=" · ".join(cambios[:5]),
-        )
+    if cambios:
+        auto_check_service.notificar_cambios(db, user, cambios)
 
-    return {"success": True, "periodo": "automático", "cambios": cambios}
+    return {
+        "success": True,
+        "periodo": "automático",
+        "cambios": [c["mensaje"] for c in cambios],
+        "total_cambios": len(cambios),
+    }
+
+@app.get("/notificaciones")
+def get_notificaciones(usuario: str, db: Session = Depends(get_db)):
+    """Lista de notificaciones (recientes primero) + conteo de no leídas."""
+    filas = (
+        db.query(Notificacion)
+        .filter(Notificacion.usuario_banner == usuario)
+        .order_by(Notificacion.fecha_creacion.desc())
+        .all()
+    )
+    no_leidas = (
+        db.query(Notificacion)
+        .filter(Notificacion.usuario_banner == usuario, Notificacion.leida.is_(False))
+        .count()
+    )
+    return {
+        "no_leidas": no_leidas,
+        "total": len(filas),
+        "notificaciones": [
+            {
+                "id": n.id,
+                "mensaje": n.mensaje,
+                "curso": n.curso,
+                "componente": n.componente,
+                "fecha_creacion": n.fecha_creacion.isoformat() if n.fecha_creacion else None,
+                "leida": bool(n.leida),
+            }
+            for n in filas
+        ],
+    }
+
+@app.patch("/notificaciones/marcar-leidas")
+def marcar_notificaciones_leidas(usuario: str, db: Session = Depends(get_db)):
+    """Marca todas las notificaciones del usuario como leídas."""
+    result = (
+        db.query(Notificacion)
+        .filter(Notificacion.usuario_banner == usuario, Notificacion.leida.is_(False))
+        .update({"leida": True}, synchronize_session=False)
+    )
+    db.commit()
+    return {"message": "Notificaciones marcadas como leídas", "marcadas": result}
+
+@app.patch("/notificaciones/{notificacion_id}/marcar-leida")
+def marcar_notificacion_leida(notificacion_id: int, usuario: str, db: Session = Depends(get_db)):
+    """Marca una notificación específica como leída."""
+    notif = (
+        db.query(Notificacion)
+        .filter(Notificacion.id == notificacion_id, Notificacion.usuario_banner == usuario)
+        .first()
+    )
+    if not notif:
+        raise HTTPException(status_code=404, detail="Notificación no encontrada")
+    notif.leida = True
+    db.commit()
+    return {"message": "Notificación marcada como leída", "id": notif.id}
 
 if __name__ == "__main__":
     import uvicorn

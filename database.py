@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from cryptography.fernet import Fernet
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -24,6 +25,18 @@ class UserSetting(Base):
     ultimo_snapshot_notas = Column(Text, nullable=True)
     ultima_revision = Column(DateTime, nullable=True)
     fcm_token = Column(String, nullable=True)
+
+
+class Notificacion(Base):
+    __tablename__ = "notificaciones"
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_banner = Column(String, index=True, nullable=False)
+    mensaje = Column(String, nullable=False)
+    curso = Column(String, nullable=True)
+    componente = Column(String, nullable=True)
+    fecha_creacion = Column(DateTime, default=datetime.now, index=True)
+    leida = Column(Boolean, default=False)
 
 Base.metadata.create_all(bind=engine)
 
@@ -58,3 +71,16 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def guardar_notificaciones(db, usuario_banner: str, cambios: list):
+    """Persiste filas de notificación (leida=False) para cada cambio detectado."""
+    for c in cambios:
+        db.add(Notificacion(
+            usuario_banner=usuario_banner,
+            mensaje=c.get("mensaje", ""),
+            curso=c.get("curso"),
+            componente=c.get("componente"),
+            fecha_creacion=datetime.now(),
+            leida=False,
+        ))
+    db.commit()

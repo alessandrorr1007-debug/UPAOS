@@ -2,7 +2,7 @@ import json
 import traceback
 from datetime import datetime
 
-from database import SessionLocal, UserSetting, decrypt_password
+from database import SessionLocal, UserSetting, decrypt_password, guardar_notificaciones
 from services.banner_sso_service import banner_sso_service
 from services.notification_service import notification_service
 from services.scraper_service import scraper_service
@@ -69,7 +69,7 @@ def _construir_snapshot(session, term: str) -> list:
 def _comparar_snapshots(prev, nuevo) -> list:
     """
     Compara el snapshot anterior con el nuevo. Devuelve una lista de cambios
-    legibles, p.ej. "Nueva nota en AGILE DEVELOPMENT: Evaluación de Proceso 2 = 15".
+    estructurados: [{"mensaje": "...", "curso": "...", "componente": "..."}, ...].
     La primera pasada (sin snapshot previo) no genera notificaciones.
     """
     if not prev:
@@ -85,13 +85,42 @@ def _comparar_snapshots(prev, nuevo) -> list:
                 vieja = viejo.get("componentes", {}).get(cname, {}).get("nota")
             if nueva == vieja:
                 continue
+            nombre_curso = curso.get("curso")
             if nueva is not None and vieja is None:
-                cambios.append(f"Nueva nota en {curso.get('curso')}: {cname} = {nueva}")
+                cambios.append({
+                    "mensaje": f"Nueva nota en {nombre_curso}: {cname} = {nueva}",
+                    "curso": nombre_curso,
+                    "componente": cname,
+                })
             elif nueva is not None:
-                cambios.append(f"Nota actualizada en {curso.get('curso')}: {cname} = {nueva} (antes {vieja})")
+                cambios.append({
+                    "mensaje": f"Nota actualizada en {nombre_curso}: {cname} = {nueva} (antes {vieja})",
+                    "curso": nombre_curso,
+                    "componente": cname,
+                })
             else:
-                cambios.append(f"Sin nota en {curso.get('curso')}: {cname}")
+                cambios.append({
+                    "mensaje": f"Sin nota en {nombre_curso}: {cname}",
+                    "curso": nombre_curso,
+                    "componente": cname,
+                })
     return cambios
+
+
+def notificar_cambios(db, user, cambios: list):
+    """Persiste las notificaciones y envía el push FCM (si el usuario tiene token)."""
+    if not cambios:
+        return
+    guardar_notificaciones(db, user.usuario_campus, cambios)
+    if user.fcm_token and notification_service.initialized:
+        body = " · ".join(c["mensaje"] for c in cambios[:5])
+        if len(cambios) > 5:
+            body += f" (+{len(cambios) - 5} más)"
+        notification_service.send_push_notification(
+            token=user.fcm_token,
+            title="Nueva nota en UPAO",
+            body=body,
+        )
 
 
 def revisar_usuario(user) -> tuple[list, list | None]:
@@ -160,16 +189,8 @@ def run_auto_check():
                 db.commit()
 
                 if cambios:
-                    body = " · ".join(cambios[:5])
-                    if len(cambios) > 5:
-                        body += f" (+{len(cambios) - 5} más)"
-                    print(f"[AutoCheck] Cambios para {user.usuario_campus}: {cambios}")
-                    if user.fcm_token and notification_service.initialized:
-                        notification_service.send_push_notification(
-                            token=user.fcm_token,
-                            title="Nueva nota en UPAO",
-                            body=body,
-                        )
+                    print(f"[AutoCheck] Cambios para {user.usuario_campus}: {[c['mensaje'] for c in cambios]}")
+                    notificar_cambios(db, user, cambios)
                 else:
                     print(f"[AutoCheck] Sin cambios para {user.usuario_campus}.")
             except Exception as e:
