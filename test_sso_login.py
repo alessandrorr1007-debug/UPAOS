@@ -69,6 +69,11 @@ def main():
         print(f"\n=== RESULTADO DE DESGLOSE DE COMPONENTES (termCode={selected_term}, CRN={detail_crn}) ===")
         print(json.dumps(detail_res, indent=2, ensure_ascii=False))
 
+        print(f"\n8. Consultando Asistencia (GET getRegisteredSections, pageMaxSize=50)...")
+        attendance_res = banner_sso_service.get_attendance(session)
+        print(f"\n=== RESULTADO DE ASISTENCIA (Total: {attendance_res.get('totalCount')}, raw_totalCount: {attendance_res.get('raw_totalCount')}) ===")
+        print(json.dumps(attendance_res, indent=2, ensure_ascii=False))
+
     else:
         print("\n[FALLO] El inicio de sesión SSO falló. Verifique credenciales.")
 

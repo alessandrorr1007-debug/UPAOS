@@ -206,6 +206,18 @@ def buscar_detalle_curso(req: NotasDetalleRequest, authorization: str = Header(.
     result = banner_sso_service.get_course_grade_detail(session, req.termCode, req.courseReferenceNumber)
     return result
 
+@app.get("/asistencia")
+def get_asistencia(authorization: str = Header(..., alias="Authorization")):
+    token = authorization.replace("Bearer ", "").strip()
+    print(f"[GET /asistencia] Token: {token[:15]}...")
+    session = ACTIVE_SESSIONS.get(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
+
+    result = banner_sso_service.get_attendance(session)
+    print(f"[SUCCESS /asistencia] Total registros: {result.get('totalCount')}")
+    return result
+
 @app.patch("/settings/auto-check")
 def update_auto_check(req: AutoCheckSetting, usuario: str, db: Session = Depends(get_db)):
     user = db.query(UserSetting).filter(UserSetting.usuario_campus == usuario).first()

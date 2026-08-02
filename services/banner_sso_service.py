@@ -6,6 +6,7 @@ import json
 class BannerSSOService:
     def __init__(self):
         self.ssb_base_url = "https://ssb.upao.edu.pe/StudentSelfService/ssb/studentGrades"
+        self.attendance_base_url = "https://ssb.upao.edu.pe/StudentSelfService/ssb/studentAttendanceTracking"
         self.component_base_url = "https://ssb.upao.edu.pe/StudentSelfService/componentDetails"
         self.sso_login_url = "https://upaosso.upao.edu.pe:410/Account/Login"
 
@@ -278,6 +279,137 @@ class BannerSSOService:
                 "Estimación no oficial basada en los pesos de los componentes con nota registrada."
             )
         }
+
+    @staticmethod
+    def _convertir_horario(schedule) -> str:
+        """Convierte el array schedule [Lun..Dom] ('false' o letra del día) a texto legible."""
+        dias = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+        activos = []
+        if isinstance(schedule, list):
+            for idx, val in enumerate(schedule):
+                if idx < len(dias) and val not in (None, "", "false", "False", False):
+                    activos.append(dias[idx])
+        return ", ".join(activos) if activos else "Sin horario registrado"
+
+    @staticmethod
+    def _convertir_hora(hora_raw):
+        """Convierte '1420' a ('14:20', '2:20 PM'). Devuelve el valor original si no es válido."""
+        try:
+            s = str(hora_raw).strip()
+            if len(s) == 4 and s.isdigit():
+                hh = int(s[:2])
+                mm = s[2:]
+                suffix = "AM" if hh < 12 else "PM"
+                h12 = hh % 12
+                if h12 == 0:
+                    h12 = 12
+                return f"{s[:2]}:{mm}", f"{h12}:{mm} {suffix}"
+        except (TypeError, ValueError):
+            pass
+        return hora_raw, hora_raw
+
+    @staticmethod
+    def _normalizar_asistencia(item: dict) -> dict:
+        """Mapea un item real de getRegisteredSections a nombres en español."""
+        crn = item.get("courseReferenceNumber")
+        course_number = item.get("courseNumber") or item.get("courseDisplayValue")
+        term = item.get("termCode")
+        subject_desc = item.get("subjectDesc")
+        subject_code = item.get("subjectCode")
+        section_title = item.get("sectionTitle")
+        sequence = item.get("sequenceNumber")
+        hora_24, hora_12 = BannerSSOService._convertir_hora(item.get("time"))
+
+        return {
+            "crn": str(crn) if crn is not None else None,
+            "curso": str(course_number) if course_number is not None else None,
+            "materia": subject_desc,
+            "codigo_materia": subject_code,
+            "nombre_curso": section_title,
+            "seccion": str(sequence) if sequence is not None else None,
+            "periodo": str(term) if term is not None else None,
+            "faltas": item.get("missed"),
+            "porcentaje": item.get("percentage"),
+            "horario_dias": BannerSSOService._convertir_horario(item.get("schedule")),
+            "hora": hora_24,
+            "hora_12h": hora_12,
+            "sectionMeetingId": item.get("sectionMeetingId"),
+            "sub_periodo": item.get("partOfTermCode"),
+            "raw": item
+        }
+
+    def get_attendance(self, session: requests.Session, page_max_size: int = 50) -> dict:
+        """
+        GET getRegisteredSections (API JSON directa de Banner, reutiliza la sesión
+        SSO autenticada). Trae TODOS los cursos con asistencia de TODOS los periodos
+        en una única llamada (pageMaxSize=50). Si el total real supera pageMaxSize,
+        pagina automáticamente con pageOffset hasta reunir totalCount.
+        """
+        url_template = (
+            f"{self.attendance_base_url}/getRegisteredSections?filterText="
+            f"&pageMaxSize={page_max_size}&pageOffset={{offset}}"
+            f"&sortColumn=courseReferenceNumber&sortDirection=asc"
+        )
+        session.headers.update({
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": self.attendance_base_url
+        })
+
+        all_items = []
+        total_count = None
+        offset = 0
+        try:
+            while True:
+                url = url_template.format(offset=offset)
+                print(f"[Banner Diagnostic] GET getRegisteredSections (pageOffset={offset}): {url}")
+                res = session.get(url, timeout=15)
+                print(f"[Banner Log] GET getRegisteredSections -> HTTP Status: {res.status_code}")
+                if res.status_code != 200:
+                    return {
+                        "success": False,
+                        "status": f"HTTP_{res.status_code}",
+                        "message": f"Error HTTP {res.status_code} al consultar asistencia",
+                        "asistencia": []
+                    }
+
+                data = res.json()
+                items = data.get("data", []) if isinstance(data, dict) else []
+                raw_total = data.get("totalCount") if isinstance(data, dict) else None
+                if raw_total is not None:
+                    total_count = raw_total
+
+                all_items.extend(items)
+
+                # Paginación real: seguir hasta juntar todos los registros.
+                if len(items) == 0:
+                    break
+                if total_count is not None and len(all_items) >= int(total_count):
+                    break
+                if offset > 10000:
+                    print("[Banner Warning] Límite de seguridad de paginación alcanzado en get_attendance.")
+                    break
+                offset += page_max_size
+
+            asistencia = [
+                self._normalizar_asistencia(item)
+                for item in all_items if isinstance(item, dict)
+            ]
+            print(f"[Banner Log] getRegisteredSections OK: {len(asistencia)} registros de asistencia.")
+            return {
+                "success": True,
+                "totalCount": len(asistencia),
+                "raw_totalCount": total_count,
+                "asistencia": asistencia
+            }
+        except Exception as e:
+            print(f"[Banner Error] Excepción en get_attendance: {e}")
+            return {
+                "success": False,
+                "status": "EXCEPCION",
+                "message": f"Excepción en get_attendance: {e}",
+                "asistencia": []
+            }
 
     def _normalizar_componente(self, item: dict) -> dict:
         """
