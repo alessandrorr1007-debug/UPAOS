@@ -159,12 +159,16 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
     raw_cursos = result.get("cursos", [])
     normalized_cursos = []
 
+    # Extraer la lista real de cursos contenida en 'data' si viniera anidada
+    if isinstance(raw_cursos, dict):
+        raw_cursos = raw_cursos.get("data", [])
+
     if isinstance(raw_cursos, list):
         for item in raw_cursos:
             if isinstance(item, dict):
                 course_title = item.get("courseTitle") or item.get("subjectDescription") or item.get("courseNumber") or item.get("nombre") or "Curso"
                 parcial_grade = item.get("midtermGrade") or item.get("parcial")
-                final_grade = item.get("finalGrade") or item.get("final")
+                final_grade = item.get("finalGrade") or item.get("historyFinalGrade") or item.get("calculatedFinalGrade") or item.get("final")
                 crn = item.get("courseReferenceNumber") or item.get("crn") or item.get("id")
 
                 normalized_cursos.append({
@@ -183,6 +187,7 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
         "cursos": normalized_cursos,
         "totalCount": len(normalized_cursos)
     }
+    print(f"[SUCCESS /notas/buscar] Retornando {len(normalized_cursos)} cursos procesados a la app Android.")
     return response_data
 
 @app.post("/notas/detalle")
@@ -212,7 +217,6 @@ def update_device_token(req: DeviceTokenRequest, usuario: str, db: Session = Dep
     user.fcm_token = req.fcm_token
     db.commit()
     
-    # Probar notificación de bienvenida si Firebase está inicializado
     if req.fcm_token and notification_service.initialized:
         notification_service.send_push_notification(
             token=req.fcm_token,
@@ -239,7 +243,6 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
     if session:
         notas = banner_sso_service.get_courses(session, "202610", "UG")
         
-        # Si se detectaron cambios y el usuario tiene FCM token registrado, enviar notificación push
         if user.fcm_token and notification_service.initialized:
             notification_service.send_push_notification(
                 token=user.fcm_token,

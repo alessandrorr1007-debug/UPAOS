@@ -156,60 +156,42 @@ class BannerSSOService:
         except Exception as e:
             return {"success": False, "message": f"Excepción en get_niveles: {e}"}
 
-    def select_term_context(self, session: requests.Session, term: str) -> bool:
-        """
-        Establece el periodo activo en la sesión Banner SSB antes de consultar cursos.
-        """
-        try:
-            url = f"{self.ssb_base_url}/selectTerm"
-            session.headers.update({
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "X-Requested-With": "XMLHttpRequest",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Referer": self.ssb_base_url
-            })
-            res = session.post(url, data={"term": term})
-            print(f"[Banner Log] POST selectTerm (term={term}) -> HTTP Status: {res.status_code}")
-            return res.status_code == 200
-        except Exception as e:
-            print(f"[Banner Warning] Error en selectTerm: {e}")
-            return False
-
     def get_courses(self, session: requests.Session, term: str, level: str = "UG") -> dict:
         """
-        GET /courses?termCode={term}&levelCode={level}...
-        Si con levelCode no devuelve cursos, prueba la consulta directa por termCode para garantizar que ningún curso quede excluido.
+        GET /courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1
+        Banner SSB responde con JSON dict: {"success": true, "data": [...], "totalCount": N}
+        Extrae correctamente 'data' del objeto diccionario de respuesta.
         """
         try:
-            self.select_term_context(session, term)
-
+            url = f"{self.ssb_base_url}/courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
             session.headers.update({
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "X-Requested-With": "XMLHttpRequest",
                 "Referer": self.ssb_base_url
             })
+            res = session.get(url)
+            print(f"[Banner Log] GET Cursos (Term: {term}, Level: {level}) -> HTTP Status: {res.status_code}")
 
-            # Intento 1: Con termCode y levelCode
-            url1 = f"{self.ssb_base_url}/courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
-            res1 = session.get(url1)
-            print(f"[Banner Log] GET Cursos Intento 1 (Term: {term}, Level: {level}) -> HTTP Status: {res1.status_code}")
+            if res.status_code == 200:
+                json_body = res.json()
+                
+                # Extraer la lista real de cursos contenida en 'data' del diccionario
+                if isinstance(json_body, dict):
+                    course_list = json_body.get("data", [])
+                elif isinstance(json_body, list):
+                    course_list = json_body
+                else:
+                    course_list = []
 
-            if res1.status_code == 200:
-                data1 = res1.json()
-                if isinstance(data1, list) and len(data1) > 0:
-                    return {"success": True, "totalCount": len(data1), "cursos": data1}
+                print(f"[Banner Log] Cursos extraídos exitosamente de 'data': {len(course_list)} elementos para term={term}.")
+                return {
+                    "success": True,
+                    "totalCount": len(course_list),
+                    "cursos": course_list,
+                    "raw_response": json_body
+                }
 
-            # Intento 2: Fallback directo solo con termCode (sin restringir por levelCode)
-            url2 = f"{self.ssb_base_url}/courses?termCode={term}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
-            res2 = session.get(url2)
-            print(f"[Banner Log] GET Cursos Intento 2 Fallback (Term: {term}) -> HTTP Status: {res2.status_code}")
-
-            if res2.status_code == 200:
-                data2 = res2.json()
-                if isinstance(data2, list):
-                    return {"success": True, "totalCount": len(data2), "cursos": data2}
-
-            return {"success": True, "totalCount": 0, "cursos": []}
+            return {"success": False, "message": f"Error HTTP {res.status_code} al consultar cursos"}
         except Exception as e:
             return {"success": False, "message": f"Excepción en get_courses: {e}"}
 
