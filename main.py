@@ -10,6 +10,7 @@ from config import settings
 from database import get_db, UserSetting, encrypt_password, decrypt_password
 from services.scraper_service import scraper_service, ACTIVE_SESSIONS
 from services.banner_sso_service import banner_sso_service
+from services.notification_service import notification_service
 
 app = FastAPI(title=settings.APP_NAME)
 
@@ -54,7 +55,11 @@ class DeviceTokenRequest(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"message": "API de consulta UPAO Campus Virtual / Banner SSB activa", "status": "ok"}
+    return {
+        "message": "API de consulta UPAO Campus Virtual / Banner SSB activa",
+        "firebase_status": "Inicializado" if notification_service.initialized else "No configurado",
+        "status": "ok"
+    }
 
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
@@ -100,12 +105,10 @@ def get_periodos(authorization: str | None = Header(None, alias="Authorization")
         token = authorization.replace("Bearer ", "").strip()
         session = ACTIVE_SESSIONS.get(token)
 
-    # Si hay sesión activa en Banner SSB, consultar los periodos reales
     if session:
         banner_res = banner_sso_service.get_periodos(session)
         if banner_res.get("success"):
             raw_periodos = banner_res.get("periodos", [])
-            # Extraer lista limpia de códigos/nombres
             periodos_str_list = [p.get("code") for p in raw_periodos if p.get("code")]
             periodo_actual = periodos_str_list[0] if periodos_str_list else "202610"
             return {
@@ -114,7 +117,6 @@ def get_periodos(authorization: str | None = Header(None, alias="Authorization")
                 "detalles_periodos": raw_periodos
             }
 
-    # Fallback predeterminado si no hay sesión aún
     return {
         "periodo_actual": "202610",
         "periodos": ["202610", "202520", "202510"]
@@ -143,16 +145,15 @@ def get_carreras(term: str = "202610", authorization: str | None = Header(None, 
 @app.post("/notas/buscar")
 def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias="Authorization")):
     token = authorization.replace("Bearer ", "").strip()
-    print(f"[POST /notas/buscar] Token: {token[:15]}..., Periodo enviado: {req.periodo}, Nivel enviado: {req.carrera}")
+    print(f"[POST /notas/buscar] Token: {token[:15]}..., Periodo: {req.periodo}, Nivel: {req.carrera}")
     
     session = ACTIVE_SESSIONS.get(token)
     if not session:
-        print(f"[ERROR /notas/buscar] Sesión no encontrada en ACTIVE_SESSIONS. Tokens activos: {list(ACTIVE_SESSIONS.keys())}")
-        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido. Vuelva a iniciar sesión.")
+        print(f"[ERROR /notas/buscar] Sesión no encontrada en ACTIVE_SESSIONS.")
+        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido.")
 
     result = banner_sso_service.get_courses(session, req.periodo, req.carrera)
     if not result.get("success"):
-        print(f"[ERROR /notas/buscar] get_courses falló: {result}")
         raise HTTPException(status_code=400, detail=result.get("message", "Error al consultar cursos en Banner"))
 
     raw_cursos = result.get("cursos", [])
@@ -182,7 +183,6 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
         "cursos": normalized_cursos,
         "totalCount": len(normalized_cursos)
     }
-    print(f"[SUCCESS /notas/buscar] Retornando {len(normalized_cursos)} cursos normalizados.")
     return response_data
 
 @app.post("/notas/detalle")
@@ -211,7 +211,16 @@ def update_device_token(req: DeviceTokenRequest, usuario: str, db: Session = Dep
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     user.fcm_token = req.fcm_token
     db.commit()
-    return {"message": "Token de dispositivo actualizado correctamente"}
+    
+    # Probar notificación de bienvenida si Firebase está inicializado
+    if req.fcm_token and notification_service.initialized:
+        notification_service.send_push_notification(
+            token=req.fcm_token,
+            title="UPAO Notas Conectado",
+            body="Notificaciones activadas para actualizaciones de notas."
+        )
+
+    return {"message": "Token de dispositivo FCM actualizado correctamente", "firebase": notification_service.initialized}
 
 @app.post("/notas/actualizar-ahora")
 def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
@@ -229,6 +238,15 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
     session = ACTIVE_SESSIONS.get(token)
     if session:
         notas = banner_sso_service.get_courses(session, "202610", "UG")
+        
+        # Si se detectaron cambios y el usuario tiene FCM token registrado, enviar notificación push
+        if user.fcm_token and notification_service.initialized:
+            notification_service.send_push_notification(
+                token=user.fcm_token,
+                title="Notas Actualizadas UPAO",
+                body="Se consultaron las notas más recientes del periodo."
+            )
+
         user.ultimo_snapshot_notas = json.dumps(notas)
         db.commit()
         return {"success": True, "notas": notas}
