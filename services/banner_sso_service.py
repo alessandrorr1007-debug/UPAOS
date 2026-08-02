@@ -81,7 +81,7 @@ class BannerSSOService:
     def get_periodos(self, session: requests.Session) -> dict:
         """
         GET /term?filter=&page=1&max=50 -> Lista de periodos disponibles en Banner SSB.
-        Filtra y descarta elementos sin código o con descripción "Todos los periodos".
+        Imprime la respuesta JSON cruda sin procesar.
         """
         try:
             url = f"{self.ssb_base_url}/term?filter=&page=1&max=50"
@@ -95,18 +95,27 @@ class BannerSSOService:
 
             if res.status_code == 200:
                 data = res.json()
-                periodos_clean = []
-                for item in data if isinstance(data, list) else data.get("items", []):
-                    code = item.get("code")
-                    desc = item.get("description", "")
-                    
-                    if not code or "todos los periodos" in desc.lower():
-                        continue
+                
+                # Imprimir la respuesta JSON cruda completa para inspección directa
+                print(f"\n==================== [RAW JSON CRUDO DE /term] ====================")
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+                print(f"===================================================================\n")
 
-                    periodos_clean.append({
-                        "code": code,
-                        "description": desc
-                    })
+                periodos_clean = []
+                items = data if isinstance(data, list) else data.get("items", [])
+                
+                for item in items:
+                    if isinstance(item, dict):
+                        code = item.get("code") or item.get("termCode") or item.get("id") or item.get("term")
+                        desc = item.get("description") or item.get("termDescription") or item.get("desc") or ""
+                        
+                        # Guardar todos los datos parseados
+                        periodos_clean.append({
+                            "code": code,
+                            "description": desc,
+                            "raw_item": item
+                        })
+
                 return {"success": True, "periodos": periodos_clean, "raw": data}
 
             return {"success": False, "message": f"Error HTTP {res.status_code} al consultar periodos"}
@@ -129,44 +138,54 @@ class BannerSSOService:
 
             if res.status_code == 200:
                 data = res.json()
+                print(f"\n==================== [RAW JSON CRUDO DE /level] ====================")
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+                print(f"===================================================================\n")
+
                 niveles_clean = []
-                for item in data if isinstance(data, list) else data.get("items", []):
-                    code = item.get("code")
-                    desc = item.get("description", "")
-                    if not code:
-                        continue
-                    niveles_clean.append({
-                        "code": code,
-                        "description": desc
-                    })
+                items = data if isinstance(data, list) else data.get("items", [])
+                for item in items:
+                    if isinstance(item, dict):
+                        code = item.get("code") or item.get("levelCode") or item.get("id")
+                        desc = item.get("description") or item.get("levelDescription") or item.get("desc") or ""
+                        niveles_clean.append({
+                            "code": code,
+                            "description": desc,
+                            "raw_item": item
+                        })
                 return {"success": True, "niveles": niveles_clean, "raw": data}
 
             return {"success": False, "message": f"Error HTTP {res.status_code} al consultar niveles"}
         except Exception as e:
             return {"success": False, "message": f"Excepción en get_niveles: {e}"}
 
-    def get_curriculum(self, session: requests.Session, term: str) -> dict:
+    def select_term_context(self, session: requests.Session, term: str) -> bool:
+        """
+        Establece el periodo activo en la sesión Banner SSB si es requerido antes de consultar cursos.
+        """
         try:
-            url = f"{self.ssb_base_url}/curriculum?term={term}"
+            url = f"{self.ssb_base_url}/selectTerm"
             session.headers.update({
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "X-Requested-With": "XMLHttpRequest",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                 "Referer": self.ssb_base_url
             })
-            res = session.get(url)
-            if res.status_code == 200:
-                return {"success": True, "curriculum": res.json()}
-            return {"success": False, "message": f"Error HTTP {res.status_code}"}
+            res = session.post(url, data={"term": term})
+            print(f"[Banner Log] POST selectTerm (term={term}) -> HTTP Status: {res.status_code}")
+            return res.status_code == 200
         except Exception as e:
-            return {"success": False, "message": str(e)}
+            print(f"[Banner Warning] Error en selectTerm: {e}")
+            return False
 
     def get_courses(self, session: requests.Session, term: str, level: str) -> dict:
         """
         GET /courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1
-        Devuelve la lista principal de cursos para el periodo y nivel indicados.
-        Nota: Devuelve metadata del curso (hasComponent="Y"). El desglose de notas específicas requiere el endpoint de componentes.
         """
         try:
+            # Primero intentar fijar el contexto del periodo
+            self.select_term_context(session, term)
+
             url = f"{self.ssb_base_url}/courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
             session.headers.update({
                 "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -178,7 +197,7 @@ class BannerSSOService:
 
             if res.status_code == 200:
                 data = res.json()
-                return {"success": True, "cursos": data}
+                return {"success": True, "totalCount": len(data) if isinstance(data, list) else data.get("totalCount"), "cursos": data}
 
             return {"success": False, "message": f"Error HTTP {res.status_code} al consultar cursos"}
         except Exception as e:
@@ -191,7 +210,7 @@ class BannerSSOService:
         return {
             "success": False,
             "status": "PENDIENTE_CONFIRMAR_URL",
-            "message": "Función preparada. Pendiente obtener URL exacta de componentes vía DevTools al desplegar la flecha del curso.",
+            "message": "Función preparada. Pendiente obtener URL exacta de componentes vía DevTools.",
             "detalles": None
         }
 
