@@ -79,10 +79,6 @@ class BannerSSOService:
             return False, f"Error en conexión SSO: {str(e)}", None
 
     def get_periodos(self, session: requests.Session) -> dict:
-        """
-        GET /term?filter=&page=1&max=50 -> Lista de periodos disponibles en Banner SSB.
-        Filtra y descarta elementos cuyo 'code' sea igual a '-1' (All Terms).
-        """
         try:
             url = f"{self.ssb_base_url}/term?filter=&page=1&max=50"
             session.headers.update({
@@ -119,9 +115,6 @@ class BannerSSOService:
             return {"success": False, "message": f"Excepción en get_periodos: {e}"}
 
     def get_niveles(self, session: requests.Session, term: str) -> dict:
-        """
-        GET /level?filter=&term={term} -> Lista de niveles disponibles.
-        """
         try:
             url = f"{self.ssb_base_url}/level?filter=&term={term}"
             session.headers.update({
@@ -158,47 +151,62 @@ class BannerSSOService:
 
     def get_courses(self, session: requests.Session, term: str, level: str = "UG") -> dict:
         """
-        GET /courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1
-        Banner SSB responde con JSON dict: {"success": true, "data": [...], "totalCount": N}
-        Extrae correctamente 'data' del objeto diccionario de respuesta.
+        GET /courses?termCode={term}&levelCode={level}...
+        Si con levelCode devuelve 0 cursos, automáticamente realiza el fallback a la búsqueda por termCode directo.
         """
         try:
-            url = f"{self.ssb_base_url}/courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
             session.headers.update({
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "X-Requested-With": "XMLHttpRequest",
                 "Referer": self.ssb_base_url
             })
-            res = session.get(url)
-            print(f"[Banner Log] GET Cursos (Term: {term}, Level: {level}) -> HTTP Status: {res.status_code}")
 
-            if res.status_code == 200:
-                json_body = res.json()
+            # URL 1: Con termCode y levelCode
+            url1 = f"{self.ssb_base_url}/courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
+            print(f"[Banner Diagnostic] Solicitando UPAO URL (Intento 1): {url1}")
+            res1 = session.get(url1)
+            print(f"[Banner Diagnostic] UPAO HTTP Status: {res1.status_code}")
+
+            course_list = []
+            json_body1 = None
+
+            if res1.status_code == 200:
+                json_body1 = res1.json()
+                print(f"[Banner Diagnostic] UPAO JSON completo recibido (Intento 1):\n{json.dumps(json_body1, indent=2, ensure_ascii=False)}")
                 
-                # Extraer la lista real de cursos contenida en 'data' del diccionario
-                if isinstance(json_body, dict):
-                    course_list = json_body.get("data", [])
-                elif isinstance(json_body, list):
-                    course_list = json_body
-                else:
-                    course_list = []
+                if isinstance(json_body1, dict):
+                    course_list = json_body1.get("data", [])
+                elif isinstance(json_body1, list):
+                    course_list = json_body1
 
-                print(f"[Banner Log] Cursos extraídos exitosamente de 'data': {len(course_list)} elementos para term={term}.")
-                return {
-                    "success": True,
-                    "totalCount": len(course_list),
-                    "cursos": course_list,
-                    "raw_response": json_body
-                }
+            # Si con levelCode se obtienen 0 cursos, ejecutar Fallback sin levelCode
+            if len(course_list) == 0:
+                url2 = f"{self.ssb_base_url}/courses?termCode={term}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
+                print(f"[Banner Diagnostic] 0 Cursos obtenidos con level '{level}'. Ejecutando Fallback (Intento 2): {url2}")
+                res2 = session.get(url2)
+                print(f"[Banner Diagnostic] Fallback UPAO HTTP Status: {res2.status_code}")
 
-            return {"success": False, "message": f"Error HTTP {res.status_code} al consultar cursos"}
+                if res2.status_code == 200:
+                    json_body2 = res2.json()
+                    print(f"[Banner Diagnostic] UPAO JSON completo recibido (Fallback):\n{json.dumps(json_body2, indent=2, ensure_ascii=False)}")
+                    if isinstance(json_body2, dict):
+                        course_list = json_body2.get("data", [])
+                    elif isinstance(json_body2, list):
+                        course_list = json_body2
+
+            print(f"[Banner Diagnostic] TOTAL CURSOS EXTRAÍDOS para term={term}: {len(course_list)} elementos.")
+            return {
+                "success": True,
+                "totalCount": len(course_list),
+                "cursos": course_list,
+                "raw_response": json_body1
+            }
+
         except Exception as e:
+            print(f"[Banner Error] Excepción en get_courses: {e}")
             return {"success": False, "message": f"Excepción en get_courses: {e}"}
 
     def get_course_grade_detail(self, session: requests.Session, term: str, level: str, crn: str) -> dict:
-        """
-        Consulta el detalle de notas/componentes de un curso desplegado.
-        """
         endpoints = [
             f"{self.ssb_base_url}/components?termCode={term}&levelCode={level}&courseReferenceNumber={crn}",
             f"{self.ssb_base_url}/courseGrades?termCode={term}&levelCode={level}&courseReferenceNumber={crn}",
