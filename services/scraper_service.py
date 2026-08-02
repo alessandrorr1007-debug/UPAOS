@@ -31,10 +31,30 @@ class CampusScraperService:
             "__VIEWSTATEGENERATOR": viewstategenerator.get("value", "") if viewstategenerator else "",
         }
         
-        captcha_res = session.get(self.captcha_url)
+        # Petición al captcha agregando el header Referer correcto
+        captcha_res = session.get(
+            self.captcha_url,
+            headers={"Referer": self.login_url}
+        )
         captcha_bytes = captcha_res.content
-        print(f"[Backend Log] Descargada imagen de captcha. Código HTTP: {captcha_res.status_code}, Tamaño de bytes: {len(captcha_bytes)}")
+        content_type = captcha_res.headers.get("Content-Type", "")
         
+        print(f"[Backend Log] GET Captcha -> HTTP Status: {captcha_res.status_code}")
+        print(f"[Backend Log] GET Captcha -> Content-Type: {content_type}")
+        print(f"[Backend Log] GET Captcha -> Tamaño de bytes: {len(captcha_bytes)}")
+
+        # Guardar en archivo local temporal para depuración visual directa
+        debug_filename = "debug_captcha.png" if "image" in content_type.lower() else "debug_captcha.html"
+        try:
+            with open(debug_filename, "wb") as f:
+                f.write(captcha_bytes)
+            print(f"[Backend Log] Archivo local de depuración guardado en: {debug_filename}")
+        except Exception as e:
+            print(f"[Backend Warning] No se pudo guardar {debug_filename}: {e}")
+
+        if "image" not in content_type.lower():
+            print(f"[Backend CRÍTICO] La URL del captcha devolvió {content_type} en vez de imagen! Primeros 200 caracteres:\n{captcha_bytes[:200].decode('utf-8', errors='ignore')}")
+
         return session, form_data, captcha_bytes
 
     def login(self, username: str, password: str, manual_captcha: str | None = None) -> dict:
@@ -46,7 +66,7 @@ class CampusScraperService:
             
         if not captcha_code:
             img_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
-            print(f"[Backend Log] OCR falló o no dio 6 caracteres. Generado base64 para fallback. Longitud base64: {len(img_b64)}")
+            print(f"[Backend Log] OCR falló. Retornando fallback base64 con {len(captcha_bytes)} bytes de imagen (String Base64: {len(img_b64)} chars).")
             return {
                 "success": False,
                 "necesita_captcha": True,
@@ -74,12 +94,18 @@ class CampusScraperService:
                 "message": "Login exitoso"
             }
         else:
-            img_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
-            print(f"[Backend Log] Credenciales o captcha rechazado por el campus. Generado base64 para fallback. Longitud base64: {len(img_b64)}")
+            # Re-solicitar un captcha FRESCO para el nuevo intento si el POST falló
+            try:
+                fresh_captcha = session.get(self.captcha_url, headers={"Referer": self.login_url}).content
+                fresh_b64 = base64.b64encode(fresh_captcha).decode("utf-8")
+                print(f"[Backend Log] POST Login rechazado. Obtenida nueva imagen fresca ({len(fresh_captcha)} bytes). String Base64: {len(fresh_b64)} chars.")
+            except Exception:
+                fresh_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
+
             return {
                 "success": False,
                 "necesita_captcha": True,
-                "imagen_base64": img_b64,
+                "imagen_base64": fresh_b64,
                 "message": "Código o credenciales incorrectos."
             }
 
