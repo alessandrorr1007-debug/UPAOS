@@ -7,6 +7,9 @@ from services.banner_sso_service import banner_sso_service
 
 ACTIVE_SESSIONS: dict[str, requests.Session] = {}
 
+def _token_para(username: str) -> str:
+    return f"sess_{username}_{base64.b64encode(username.encode()).decode()[:10]}"
+
 class CampusScraperService:
     def __init__(self):
         self.login_url = settings.CAMPUS_URL
@@ -23,7 +26,7 @@ class CampusScraperService:
         success, msg, session = banner_sso_service.login_sso(username, password)
 
         if success and session is not None:
-            token = f"sess_{username}_{base64.b64encode(username.encode()).decode()[:10]}"
+            token = _token_para(username)
             ACTIVE_SESSIONS[token] = session
             return {
                 "success": True,
@@ -34,6 +37,52 @@ class CampusScraperService:
 
         print(f"[Scraper] SSO falló ('{msg}'). Intentando fallback legado ASP.NET WebForms con OCR...")
         return self._login_legacy(username, password, manual_captcha)
+
+    def _sesion_sigue_valida(self, session: requests.Session) -> bool:
+        """
+        Comprueba rápido (1 GET a /term) que la sesión de Banner sigue autenticada.
+        Válida si responde 200 con JSON y NO redirige a la página de login.
+        """
+        if session is None:
+            return False
+        try:
+            probe = session.get(
+                f"{banner_sso_service.ssb_base_url}/term?filter=&page=1&max=5",
+                timeout=12,
+                allow_redirects=True,
+            )
+            if probe.status_code != 200:
+                return False
+            if "login" in probe.url.lower():
+                return False
+            content_type = probe.headers.get("content-type", "")
+            if "json" not in content_type.lower():
+                return False
+            return True
+        except Exception as e:
+            print(f"[Scraper] Excepción validando sesión: {e}")
+            return False
+
+    def obtener_sesion_valida(self, username: str, password: str) -> tuple[requests.Session | None, str | None]:
+        """
+        Optimización clave para el chequeo de 10 min: reutiliza la sesión
+        autenticada guardada en ACTIVE_SESSIONS si sigue válida (1 GET a /term).
+        Solo si expiró se hace el login completo de nuevo.
+        Devuelve (session, token) o (None, None).
+        """
+        token = _token_para(username)
+        session = ACTIVE_SESSIONS.get(token)
+        if session is not None and self._sesion_sigue_valida(session):
+            print(f"[Scraper] Sesión de {username} reutilizada sin login completo.")
+            return session, token
+
+        print(f"[Scraper] Sesión de {username} expirada o ausente. Haciendo login completo...")
+        result = self.login(username, password)
+        if result.get("success"):
+            new_token = result.get("token")
+            return ACTIVE_SESSIONS.get(new_token), new_token
+        print(f"[Scraper] Login completo falló para {username}: {result.get('message')}")
+        return None, None
 
     def _login_legacy(self, username: str, password: str, manual_captcha: str | None = None) -> dict:
         session, form_fields, captcha_bytes = self.initialize_login_session()
@@ -62,7 +111,7 @@ class CampusScraperService:
         post_res = session.post(self.login_url, data=payload)
         
         if "login.aspx" not in post_res.url and post_res.status_code == 200:
-            token = f"sess_{username}_{base64.b64encode(username.encode()).decode()[:10]}"
+            token = _token_para(username)
             ACTIVE_SESSIONS[token] = session
             return {
                 "success": True,

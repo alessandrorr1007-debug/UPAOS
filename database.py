@@ -1,6 +1,6 @@
 import json
 from cryptography.fernet import Fernet
-from sqlalchemy import Boolean, Column, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker
 from config import settings
 
@@ -20,10 +20,31 @@ class UserSetting(Base):
     usuario_campus = Column(String, primary_key=True, index=True)
     password_encriptada = Column(Text, nullable=False)
     auto_check_enabled = Column(Boolean, default=False)
+    intervalo_chequeo_minutos = Column(Integer, default=10)
     ultimo_snapshot_notas = Column(Text, nullable=True)
+    ultima_revision = Column(DateTime, nullable=True)
     fcm_token = Column(String, nullable=True)
 
 Base.metadata.create_all(bind=engine)
+
+def _migrate_missing_columns():
+    """Agrega columnas nuevas a tablas SQLite ya existentes (ALTER TABLE)."""
+    try:
+        inspector = inspect(engine)
+        columns = {col["name"] for col in inspector.get_columns("user_settings")}
+        nuevas_columnas = {
+            "intervalo_chequeo_minutos": "ALTER TABLE user_settings ADD COLUMN intervalo_chequeo_minutos INTEGER DEFAULT 10",
+            "ultima_revision": "ALTER TABLE user_settings ADD COLUMN ultima_revision DATETIME",
+        }
+        with engine.begin() as conn:
+            for name, ddl in nuevas_columnas.items():
+                if name not in columns:
+                    conn.exec_driver_sql(ddl)
+                    print(f"[DB] Columna añadida: {name}")
+    except Exception as e:
+        print(f"[DB Warning] No se pudieron migrar columnas: {e}")
+
+_migrate_missing_columns()
 
 def encrypt_password(plain_password: str) -> str:
     return cipher_suite.encrypt(plain_password.encode()).decode()

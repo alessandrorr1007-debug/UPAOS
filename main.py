@@ -1,18 +1,48 @@
 import json
 import os
 import traceback
+from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from config import settings
 from database import get_db, UserSetting, encrypt_password, decrypt_password
 from services.scraper_service import scraper_service, ACTIVE_SESSIONS
 from services.banner_sso_service import banner_sso_service
 from services.notification_service import notification_service
+from services import auto_check_service
 
-app = FastAPI(title=settings.APP_NAME)
+
+def _tick_auto_check():
+    try:
+        auto_check_service.run_auto_check()
+    except Exception as e:
+        print(f"[Scheduler] Error en tick auto_check: {e}")
+        print(traceback.format_exc())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = BackgroundScheduler(timezone="America/Lima")
+    scheduler.add_job(
+        _tick_auto_check,
+        trigger=IntervalTrigger(minutes=5),
+        id="auto_check",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.start()
+    print("[Scheduler] Job auto_check iniciado (cada 5 min, respeta el intervalo por usuario).")
+    yield
+    scheduler.shutdown(wait=False)
+
+
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
 @app.middleware("http")
 def log_requests(request: Request, call_next):
@@ -52,6 +82,9 @@ class NotasDetalleRequest(BaseModel):
 class AutoCheckSetting(BaseModel):
     enabled: bool
 
+class IntervaloSetting(BaseModel):
+    minutos: int = Field(..., description="Intervalo de chequeo en minutos: 5, 10, 15 o 30")
+
 class DeviceTokenRequest(BaseModel):
     fcm_token: str
 
@@ -62,6 +95,11 @@ def read_root():
         "firebase_status": "Inicializado" if notification_service.initialized else "No configurado",
         "status": "ok"
     }
+
+@app.get("/healthz")
+def healthz():
+    """Endpoint liviano para cron externo (evita que Render duerma el servicio)."""
+    return {"status": "ok", "service": "upaos-api", "time": datetime.utcnow().isoformat()}
 
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
@@ -113,7 +151,9 @@ def get_periodos(authorization: str | None = Header(None, alias="Authorization")
             raw_periodos = banner_res.get("periodos", [])
             periodos_str_list = [p.get("code") for p in raw_periodos if p.get("code")]
             return {
-                "periodo_actual": periodos_str_list[0] if periodos_str_list else None,
+                # Regla compartida: periodo regular (termina en 10/20, excluye 90)
+                # con el código numérico más alto (el más reciente).
+                "periodo_actual": banner_sso_service.periodo_actual(raw_periodos),
                 "periodos": periodos_str_list,
                 "detalles_periodos": raw_periodos
             }
@@ -231,6 +271,29 @@ def update_auto_check(req: AutoCheckSetting, usuario: str, db: Session = Depends
     db.commit()
     return {"message": "Configuración actualizada correctamente", "auto_check_enabled": req.enabled}
 
+@app.patch("/settings/intervalo")
+def update_intervalo(req: IntervaloSetting, usuario: str, db: Session = Depends(get_db)):
+    if req.minutos not in (5, 10, 15, 30):
+        raise HTTPException(status_code=422, detail="El intervalo debe ser uno de: 5, 10, 15, 30 minutos")
+    user = db.query(UserSetting).filter(UserSetting.usuario_campus == usuario).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no registrado en ajustes")
+    user.intervalo_chequeo_minutos = req.minutos
+    db.commit()
+    return {"message": "Intervalo actualizado correctamente", "intervalo_chequeo_minutos": req.minutos}
+
+@app.get("/settings")
+def get_settings(usuario: str, db: Session = Depends(get_db)):
+    user = db.query(UserSetting).filter(UserSetting.usuario_campus == usuario).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no registrado en ajustes")
+    return {
+        "auto_check_enabled": bool(user.auto_check_enabled),
+        "intervalo_chequeo_minutos": user.intervalo_chequeo_minutos or 10,
+        "tiene_token_fcm": bool(user.fcm_token),
+        "ultima_revision": user.ultima_revision.isoformat() if user.ultima_revision else None,
+    }
+
 @app.post("/device-token")
 def update_device_token(req: DeviceTokenRequest, usuario: str, db: Session = Depends(get_db)):
     user = db.query(UserSetting).filter(UserSetting.usuario_campus == usuario).first()
@@ -253,30 +316,23 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
     user = db.query(UserSetting).filter(UserSetting.usuario_campus == usuario).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    pass_decrypted = decrypt_password(user.password_encriptada)
-    login_res = scraper_service.login(user.usuario_campus, pass_decrypted)
-    
-    if not login_res.get("success"):
-        return {"success": False, "message": "No se pudo actualizar. " + login_res.get("message", "")}
-        
-    token = login_res.get("token")
-    session = ACTIVE_SESSIONS.get(token)
-    if session:
-        notas = banner_sso_service.get_courses(session, "202610", "UG")
-        
-        if user.fcm_token and notification_service.initialized:
-            notification_service.send_push_notification(
-                token=user.fcm_token,
-                title="Notas Actualizadas UPAO",
-                body="Se consultaron las notas más recientes del periodo."
-            )
 
-        user.ultimo_snapshot_notas = json.dumps(notas)
-        db.commit()
-        return {"success": True, "notas": notas}
-    
-    return {"success": False, "message": "No se obtuvo sesión activa"}
+    cambios, snapshot = auto_check_service.revisar_usuario(user)
+    if snapshot is None:
+        return {"success": False, "message": "No se pudo obtener una sesión válida de Banner ni el periodo actual."}
+
+    user.ultimo_snapshot_notas = json.dumps(snapshot)
+    user.ultima_revision = datetime.now()
+    db.commit()
+
+    if cambios and user.fcm_token and notification_service.initialized:
+        notification_service.send_push_notification(
+            token=user.fcm_token,
+            title="Notas Actualizadas UPAO",
+            body=" · ".join(cambios[:5]),
+        )
+
+    return {"success": True, "periodo": "automático", "cambios": cambios}
 
 if __name__ == "__main__":
     import uvicorn

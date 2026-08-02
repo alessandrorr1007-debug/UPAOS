@@ -116,6 +116,34 @@ class BannerSSOService:
         except Exception as e:
             return {"success": False, "message": f"Excepción en get_periodos: {e}"}
 
+    @staticmethod
+    def es_periodo_regular(code) -> bool:
+        """
+        True si el código de periodo corresponde al ciclo regular de la carrera
+        (termina en "10" o "20"). Los códigos que terminan en "90" son Centro de
+        Idiomas y NO se consideran ciclo regular.
+        """
+        s = str(code or "").strip()
+        return s.endswith("10") or s.endswith("20")
+
+    @staticmethod
+    def periodo_actual(periodos: list) -> str | None:
+        """
+        Dada la lista devuelta por get_periodos (dicts con 'code'), devuelve el
+        periodo regular con el código NUMÉRICO más alto (los códigos son
+        cronológicos: 202610 < 202620 < 202710, el más alto es el más reciente).
+        Excluye explícitamente los que terminan en "90" (Centro de Idiomas).
+        """
+        codes = []
+        for p in periodos or []:
+            code = p.get("code") if isinstance(p, dict) else p
+            if not BannerSSOService.es_periodo_regular(code):
+                continue
+            s = str(code).strip()
+            if s.isdigit():
+                codes.append(int(s))
+        return str(max(codes)) if codes else None
+
     def get_niveles(self, session: requests.Session, term: str) -> dict:
         try:
             url = f"{self.ssb_base_url}/level?filter=&term={term}"
