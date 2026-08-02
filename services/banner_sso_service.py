@@ -9,13 +9,6 @@ class BannerSSOService:
         self.sso_login_url = "https://upaosso.upao.edu.pe:410/Account/Login"
 
     def login_sso(self, username: str, password: str) -> tuple[bool, str, requests.Session | None]:
-        """
-        Ejecuta el flujo completo de autenticación SSO (OAuth2 / WSO2):
-        1. GET a ssb.upao.edu.pe para obtener la URL de login con los parámetros OIDC, __RequestVerificationToken y cookies de sesión.
-        2. Mapeo exacto de campos: id_usuario, nip, __RequestVerificationToken y hidden inputs OIDC.
-        3. POST de credenciales a upaosso.upao.edu.pe:410.
-        4. Verificación estricta de parámetros de error (is_error / mensaje_error) en la URL final.
-        """
         session = requests.Session()
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -42,12 +35,10 @@ class BannerSSOService:
                 if name:
                     payload[name] = value
 
-            # Mapeo exacto de campos reales confirmados: id_usuario y nip
             payload["id_usuario"] = username
             payload["nip"] = password
             payload["btn_valida"] = "Iniciar sesión"
 
-            # Limpiar campos no usados en el formulario
             payload.pop("username", None)
             payload.pop("password", None)
 
@@ -61,7 +52,6 @@ class BannerSSOService:
 
             print(f"[SSO Log] Respuesta POST final: {res_post.url}, HTTP Status: {res_post.status_code}")
 
-            # Parsear parámetros de la URL final para verificar posibles errores
             parsed_url = urlparse(res_post.url)
             query_params = parse_qs(parsed_url.query)
 
@@ -75,7 +65,6 @@ class BannerSSOService:
                 print(f"[SSO Error Log] Fallo detectado en URL final: {error_msg_decoded}")
                 return False, error_msg_decoded, None
 
-            # Éxito solo si no hay error y la URL pertenece a ssb.upao.edu.pe
             if "studentGrades" in res_post.url or "ssb.upao.edu.pe" in res_post.url:
                 print("[SSO Log] Login SSO Exitoso. Sesión autenticada creada en Banner SSB.")
                 return True, "Login SSO exitoso sin captcha", session
@@ -89,11 +78,10 @@ class BannerSSOService:
             print(f"[SSO Error] Excepción en flujo SSO: {e}")
             return False, f"Error en conexión SSO: {str(e)}", None
 
-    # --- Endpoints Reales Confirmados de Banner SSB ---
-
     def get_periodos(self, session: requests.Session) -> dict:
         """
         GET /term?filter=&page=1&max=50 -> Lista de periodos disponibles en Banner SSB.
+        Filtra y descarta elementos sin código o con descripción "Todos los periodos".
         """
         try:
             url = f"{self.ssb_base_url}/term?filter=&page=1&max=50"
@@ -107,12 +95,17 @@ class BannerSSOService:
 
             if res.status_code == 200:
                 data = res.json()
-                # Limpieza de lista para entregar código (term) y nombre visible (descripción)
                 periodos_clean = []
                 for item in data if isinstance(data, list) else data.get("items", []):
+                    code = item.get("code")
+                    desc = item.get("description", "")
+                    
+                    if not code or "todos los periodos" in desc.lower():
+                        continue
+
                     periodos_clean.append({
-                        "code": item.get("code"),
-                        "description": item.get("description")
+                        "code": code,
+                        "description": desc
                     })
                 return {"success": True, "periodos": periodos_clean, "raw": data}
 
@@ -138,9 +131,13 @@ class BannerSSOService:
                 data = res.json()
                 niveles_clean = []
                 for item in data if isinstance(data, list) else data.get("items", []):
+                    code = item.get("code")
+                    desc = item.get("description", "")
+                    if not code:
+                        continue
                     niveles_clean.append({
-                        "code": item.get("code"),
-                        "description": item.get("description")
+                        "code": code,
+                        "description": desc
                     })
                 return {"success": True, "niveles": niveles_clean, "raw": data}
 
@@ -149,9 +146,6 @@ class BannerSSOService:
             return {"success": False, "message": f"Excepción en get_niveles: {e}"}
 
     def get_curriculum(self, session: requests.Session, term: str) -> dict:
-        """
-        GET /curriculum?term={term} -> Información de currícula del estudiante.
-        """
         try:
             url = f"{self.ssb_base_url}/curriculum?term={term}"
             session.headers.update({
@@ -168,8 +162,9 @@ class BannerSSOService:
 
     def get_courses(self, session: requests.Session, term: str, level: str) -> dict:
         """
-        GET /courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=20&sortColumn=-1&sortDirection=-1
-        Endpoint principal: devuelve la lista de cursos del periodo/nivel seleccionado.
+        GET /courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1
+        Devuelve la lista principal de cursos para el periodo y nivel indicados.
+        Nota: Devuelve metadata del curso (hasComponent="Y"). El desglose de notas específicas requiere el endpoint de componentes.
         """
         try:
             url = f"{self.ssb_base_url}/courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
@@ -191,13 +186,12 @@ class BannerSSOService:
 
     def get_course_grade_detail(self, session: requests.Session, course_id: str, term: str) -> dict:
         """
-        PENDIENTE: confirmar URL real con DevTools al expandir un curso en la interfaz de Banner.
-        Placeholder preparado para integrar el desglose de subcomponentes (EP1/Parcial/EP2/Final).
+        PENDIENTE: confirmar URL real con DevTools al expandir un curso en la interfaz de Banner (hasComponent="Y").
         """
         return {
             "success": False,
             "status": "PENDIENTE_CONFIRMAR_URL",
-            "message": "Función preparada. Pendiente obtener URL exacta de desgloses vía DevTools.",
+            "message": "Función preparada. Pendiente obtener URL exacta de componentes vía DevTools al desplegar la flecha del curso.",
             "detalles": None
         }
 
