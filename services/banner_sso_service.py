@@ -216,6 +216,69 @@ class BannerSSOService:
                 return value
         return None
 
+    @staticmethod
+    def _parse_float(val) -> float | None:
+        """Convierte a float conservando decimales; None si no es numérico."""
+        if val is None:
+            return None
+        try:
+            s = str(val).strip()
+            if s in ("", "null", "None", "-"):
+                return None
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _es_componente_final(componente: dict) -> bool:
+        """Detecta el componente de evaluación final (EVF / 'EVALUACION FINAL')."""
+        for clave in ("description", "nombre", "codigo", "componente"):
+            val = componente.get(clave)
+            if val:
+                txt = str(val).upper()
+                if "FINAL" in txt or "EVF" in txt:
+                    return True
+        return False
+
+    @staticmethod
+    def _calcular_nota_proyectada(componentes: list) -> dict:
+        """
+        Calcula una nota proyectada (estimación no oficial) cuando el componente
+        Final (EVF) está pendiente pero los demás componentes con peso > 0 sí
+        tienen nota. Nunca modifica el grade oficial de Banner; devuelve campos
+        separados: nota_proyectada, pesos_pendientes y nota_proyectada_info.
+        Si el Final ya tiene nota (o no hay suficientes datos), no devuelve nada.
+        """
+        comp_final = next((c for c in componentes if BannerSSOService._es_componente_final(c)), None)
+        if comp_final is None or BannerSSOService._parse_float(comp_final.get("puntaje_obtenido")) is not None:
+            return {}
+
+        suma_ponderada = 0.0
+        pesos_pendientes = []
+        componentes_con_nota = 0
+        for c in componentes:
+            peso = BannerSSOService._parse_float(c.get("peso"))
+            nota = BannerSSOService._parse_float(c.get("puntaje_obtenido"))
+            if peso is None or peso <= 0:
+                continue
+            if nota is None:
+                pesos_pendientes.append(c.get("nombre") or c.get("codigo") or c.get("description") or "Componente")
+                continue
+            suma_ponderada += nota * (peso / 100.0)
+            componentes_con_nota += 1
+
+        if componentes_con_nota == 0:
+            return {}
+
+        # 2 decimales para evitar artefactos de coma flotante.
+        return {
+            "nota_proyectada": round(suma_ponderada, 2),
+            "pesos_pendientes": pesos_pendientes,
+            "nota_proyectada_info": (
+                "Estimación no oficial basada en los pesos de los componentes con nota registrada."
+            )
+        }
+
     def _normalizar_componente(self, item: dict) -> dict:
         """
         Normaliza un item real de componentDetails/subComponentDetails
@@ -228,11 +291,18 @@ class BannerSSOService:
         codigo = self._extraer_valor(item, ["name", "componentName", "componentCode"])
         peso = self._extraer_valor(item, ["weight", "weightPercent", "percentWeight", "gradeWeight"])
         porcentaje_logrado = self._extraer_valor(item, ["percentage", "percentAchieved"])
-        obtenido = self._extraer_valor(item, [
-            "grade", "score", "pointsEarned", "earnedPoints", "gradeEarned",
-            "midtermGrade", "finalGrade", "calculatedFinalGrade"
+        # Banner envía "grade" (nota oficial, normalmente redondeada a entero, ej. "11")
+        # y "score" (valor exacto con decimales, ej. "10.7"). Se muestra el "score"
+        # exacto tal cual; solo si el grade es cualitativo (ej. "APR") se usa el grade.
+        grade_val = self._extraer_valor(item, [
+            "grade", "gradeEarned", "midtermGrade", "finalGrade", "calculatedFinalGrade"
         ])
-        score_raw = self._extraer_valor(item, ["score", "pointsEarned", "earnedPoints"])
+        score_val = self._extraer_valor(item, ["score", "pointsEarned", "earnedPoints"])
+        if grade_val is not None and self._parse_float(grade_val) is None:
+            obtenido = grade_val
+        else:
+            obtenido = score_val if score_val is not None else grade_val
+        score_raw = score_val
         sobre = self._extraer_valor(item, [
             "totalScore", "possible", "maxPoints", "totalPoints", "pointPossible", "maxScore"
         ])
@@ -256,6 +326,7 @@ class BannerSSOService:
             "puntaje_obtenido": obtenido,
             "puntaje_sobre": sobre,
             "score": score_raw,
+            "grade_oficial": grade_val,
             "componentId": component_id,
             "hasSubComponents": has_sub_bool,
             "subcomponentes": [],
@@ -373,11 +444,13 @@ class BannerSSOService:
                 componentes.append(comp)
 
             print(f"[Banner Log] componentDetails OK: {len(componentes)} componentes para CRN {crn}.")
-            return {
+            result = {
                 "success": True,
                 "totalCount": len(componentes),
                 "detalles": componentes
             }
+            result.update(self._calcular_nota_proyectada(componentes))
+            return result
         except Exception as e:
             print(f"[Banner Error] Excepción en get_course_grade_detail: {e}")
             return {

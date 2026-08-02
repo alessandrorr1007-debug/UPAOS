@@ -141,15 +141,15 @@ class CampusScraperService:
                 cursos.append({
                     "nombre": nombre,
                     "ep1": {
-                        "nota": float(ep1_val) if ep1_val.isdigit() else ep1_val,
+                        "nota": ep1_val,
                         "detalles": []
                     },
-                    "parcial": float(parcial_val) if parcial_val.isdigit() else parcial_val,
+                    "parcial": parcial_val,
                     "ep2": {
-                        "nota": float(ep2_val) if ep2_val.isdigit() else ep2_val,
+                        "nota": ep2_val,
                         "detalles": []
                     },
-                    "final": float(final_val) if final_val.isdigit() else final_val
+                    "final": final_val
                 })
 
         return {

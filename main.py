@@ -112,16 +112,19 @@ def get_periodos(authorization: str | None = Header(None, alias="Authorization")
         if banner_res.get("success"):
             raw_periodos = banner_res.get("periodos", [])
             periodos_str_list = [p.get("code") for p in raw_periodos if p.get("code")]
-            periodo_actual = periodos_str_list[0] if periodos_str_list else "202610"
             return {
-                "periodo_actual": periodo_actual,
+                "periodo_actual": periodos_str_list[0] if periodos_str_list else None,
                 "periodos": periodos_str_list,
                 "detalles_periodos": raw_periodos
             }
 
+    # Sin sesión activa de Banner no se inventan periodos: lista vacía para que el
+    # cliente use su propio valor por defecto. La lista siempre viene del GET /term real.
     return {
-        "periodo_actual": "202610",
-        "periodos": ["202610", "202520", "202510"]
+        "periodo_actual": None,
+        "periodos": [],
+        "detalles_periodos": [],
+        "message": "Sin sesión activa de Banner para consultar periodos en vivo"
     }
 
 @app.get("/notas/carreras")
