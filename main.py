@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from config import settings
 from database import get_db, UserSetting, encrypt_password, decrypt_password
-from services.scraper_service import scraper_service
+from services.scraper_service import scraper_service, ACTIVE_SESSIONS
+from services.banner_sso_service import banner_sso_service
 
 app = FastAPI(title=settings.APP_NAME)
 
@@ -20,8 +21,8 @@ class ManualCaptchaRequest(BaseModel):
     codigo_manual: str
 
 class NotasBuscarRequest(BaseModel):
-    periodo: str = Field(default="2026-1")
-    carrera: str = Field(default="Ingeniería de Sistemas")
+    periodo: str = Field(default="202690")
+    carrera: str = Field(default="UB")
 
 class AutoCheckSetting(BaseModel):
     enabled: bool
@@ -31,7 +32,7 @@ class DeviceTokenRequest(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"message": "API de consulta UPAO Campus Virtual activa", "status": "ok"}
+    return {"message": "API de consulta UPAO Campus Virtual / Banner SSB activa", "status": "ok"}
 
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
@@ -68,38 +69,48 @@ def login_confirmar_captcha(req: ManualCaptchaRequest, db: Session = Depends(get
     return result
 
 @app.get("/notas/periodos")
-def get_periodos():
+def get_periodos(authorization: str = Header(..., alias="Authorization")):
+    token = authorization.replace("Bearer ", "").strip()
+    session = ACTIVE_SESSIONS.get(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
+    
+    banner_res = banner_sso_service.get_periodos(session)
+    if banner_res.get("success"):
+        return banner_res
+        
+    # Fallback si no hay sesión Banner activa
     now = datetime.now()
     year = now.year
-    semestre = "1" if now.month < 8 else "2"
-    periodo_actual = f"{year}-{semestre}"
+    semestre = "I" if now.month < 8 else "II"
     return {
-        "periodo_actual": periodo_actual,
-        "periodos": [
-            f"{year}-2",
-            f"{year}-1",
-            f"{year-1}-2",
-            f"{year-1}-1"
-        ]
+        "periodo_actual": f"{year}-{semestre}",
+        "periodos": [{"code": f"{year}90", "description": f"{year}-I"}, {"code": f"{year}10", "description": f"{year-1}-II"}]
     }
 
 @app.get("/notas/carreras")
-def get_carreras():
-    return {
-        "carreras": [
-            "Ingeniería de Sistemas",
-            "Medicina Humana",
-            "Derecho",
-            "Administración"
-        ]
-    }
+def get_carreras(term: str = "202690", authorization: str = Header(..., alias="Authorization")):
+    token = authorization.replace("Bearer ", "").strip()
+    session = ACTIVE_SESSIONS.get(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
+    
+    banner_res = banner_sso_service.get_niveles(session, term)
+    if banner_res.get("success"):
+        return banner_res
+
+    return {"carreras": [{"code": "UB", "description": "PREGRADO"}]}
 
 @app.post("/notas/buscar")
 def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias="Authorization")):
     token = authorization.replace("Bearer ", "").strip()
-    result = scraper_service.get_notas(token, req.periodo, req.carrera)
-    if "error" in result:
-        raise HTTPException(status_code=401, detail=result["error"])
+    session = ACTIVE_SESSIONS.get(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
+
+    result = banner_sso_service.get_courses(session, req.periodo, req.carrera)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Error al obtener cursos"))
     return result
 
 @app.patch("/settings/auto-check")
@@ -133,12 +144,14 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
         return {"success": False, "message": "No se pudo actualizar. " + login_res.get("message", "")}
         
     token = login_res.get("token")
-    notas = scraper_service.get_notas(token, "2026-1", "Ingeniería de Sistemas")
+    session = ACTIVE_SESSIONS.get(token)
+    if session:
+        notas = banner_sso_service.get_courses(session, "202690", "UB")
+        user.ultimo_snapshot_notas = json.dumps(notas)
+        db.commit()
+        return {"success": True, "notas": notas}
     
-    user.ultimo_snapshot_notas = json.dumps(notas)
-    db.commit()
-    
-    return {"success": True, "notas": notas}
+    return {"success": False, "message": "No se obtuvo sesión activa"}
 
 if __name__ == "__main__":
     import uvicorn
