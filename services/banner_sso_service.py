@@ -81,7 +81,7 @@ class BannerSSOService:
     def get_periodos(self, session: requests.Session) -> dict:
         """
         GET /term?filter=&page=1&max=50 -> Lista de periodos disponibles en Banner SSB.
-        Imprime la respuesta JSON cruda sin procesar.
+        Filtra y descarta elementos cuyo 'code' sea igual a '-1' (All Terms).
         """
         try:
             url = f"{self.ssb_base_url}/term?filter=&page=1&max=50"
@@ -95,12 +95,6 @@ class BannerSSOService:
 
             if res.status_code == 200:
                 data = res.json()
-                
-                # Imprimir la respuesta JSON cruda completa para inspección directa
-                print(f"\n==================== [RAW JSON CRUDO DE /term] ====================")
-                print(json.dumps(data, indent=2, ensure_ascii=False))
-                print(f"===================================================================\n")
-
                 periodos_clean = []
                 items = data if isinstance(data, list) else data.get("items", [])
                 
@@ -109,10 +103,13 @@ class BannerSSOService:
                         code = item.get("code") or item.get("termCode") or item.get("id") or item.get("term")
                         desc = item.get("description") or item.get("termDescription") or item.get("desc") or ""
                         
-                        # Guardar todos los datos parseados
+                        # Filtrar obligatoriamente cualquier elemento con código "-1" o sin código
+                        if not code or str(code).strip() == "-1":
+                            continue
+
                         periodos_clean.append({
-                            "code": code,
-                            "description": desc,
+                            "code": str(code),
+                            "description": str(desc),
                             "raw_item": item
                         })
 
@@ -124,7 +121,8 @@ class BannerSSOService:
 
     def get_niveles(self, session: requests.Session, term: str) -> dict:
         """
-        GET /level?filter=&term={term} -> Lista de niveles/currículas disponibles (ej. PREGRADO con código UB).
+        GET /level?filter=&term={term} -> Lista de niveles/currículas disponibles.
+        Filtra y descarta elementos cuyo 'code' sea igual a '-1' (All Course Levels).
         """
         try:
             url = f"{self.ssb_base_url}/level?filter=&term={term}"
@@ -138,19 +136,21 @@ class BannerSSOService:
 
             if res.status_code == 200:
                 data = res.json()
-                print(f"\n==================== [RAW JSON CRUDO DE /level] ====================")
-                print(json.dumps(data, indent=2, ensure_ascii=False))
-                print(f"===================================================================\n")
-
                 niveles_clean = []
                 items = data if isinstance(data, list) else data.get("items", [])
+                
                 for item in items:
                     if isinstance(item, dict):
                         code = item.get("code") or item.get("levelCode") or item.get("id")
                         desc = item.get("description") or item.get("levelDescription") or item.get("desc") or ""
+                        
+                        # Filtrar obligatoriamente cualquier elemento con código "-1" o sin código
+                        if not code or str(code).strip() == "-1":
+                            continue
+
                         niveles_clean.append({
-                            "code": code,
-                            "description": desc,
+                            "code": str(code),
+                            "description": str(desc),
                             "raw_item": item
                         })
                 return {"success": True, "niveles": niveles_clean, "raw": data}
@@ -161,7 +161,7 @@ class BannerSSOService:
 
     def select_term_context(self, session: requests.Session, term: str) -> bool:
         """
-        Establece el periodo activo en la sesión Banner SSB si es requerido antes de consultar cursos.
+        Establece el periodo activo en la sesión Banner SSB antes de consultar cursos.
         """
         try:
             url = f"{self.ssb_base_url}/selectTerm"
@@ -178,12 +178,12 @@ class BannerSSOService:
             print(f"[Banner Warning] Error en selectTerm: {e}")
             return False
 
-    def get_courses(self, session: requests.Session, term: str, level: str) -> dict:
+    def get_courses(self, session: requests.Session, term: str, level: str = "UG") -> dict:
         """
         GET /courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1
+        Consulta la lista de cursos del periodo y nivel indicados (por defecto 'UG' para PREGRADO).
         """
         try:
-            # Primero intentar fijar el contexto del periodo
             self.select_term_context(session, term)
 
             url = f"{self.ssb_base_url}/courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1"
