@@ -59,12 +59,11 @@ def main():
             {
                 "nombre": (c.get("courseTitle") or c.get("subjectDescription") or c.get("courseNumber") or "Curso"),
                 "crn": (c.get("courseReferenceNumber") or c.get("crn") or c.get("id")),
-                "parcial": c.get("parcial"),
-                "final": c.get("final"),
+                "nota_actual": c.get("nota_actual"),
             }
             for c in cursos if isinstance(c, dict)
         ]
-        print(f"\n=== RESUMEN PARCIAL/FINAL POR CURSO ===")
+        print(f"\n=== RESUMEN NOTA ACTUAL POR CURSO ===")
         print(json.dumps(resumen, indent=2, ensure_ascii=False))
 
         promedio_general, promedio_basado_en = banner_sso_service._calcular_promedio_general(cursos)

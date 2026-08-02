@@ -172,21 +172,14 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
         for item in raw_cursos:
             if isinstance(item, dict):
                 course_title = item.get("courseTitle") or item.get("subjectDescription") or item.get("courseNumber") or item.get("nombre") or "Curso"
-                # 'parcial' y 'final' vienen enriquecidos desde los componentes reales
-                # (get_courses_con_notas). Solo se respalda en midterm/finalGrade de
-                # Banner si el enriquecido vino vacío.
-                parcial_grade = item.get("parcial")
-                final_grade = item.get("final")
-                if parcial_grade is None:
-                    parcial_grade = item.get("midtermGrade")
-                if final_grade is None:
-                    final_grade = item.get("finalGrade") or item.get("historyFinalGrade") or item.get("calculatedFinalGrade")
+                # nota_actual viene enriquecida desde los componentes reales
+                # (get_courses_con_notas): promedio ponderado progresivo o None.
+                nota_actual = item.get("nota_actual")
                 crn = item.get("courseReferenceNumber") or item.get("crn") or item.get("id")
 
                 normalized_cursos.append({
                     "nombre": str(course_title),
-                    "parcial": parcial_grade,
-                    "final": final_grade,
+                    "nota_actual": nota_actual,
                     "crn": str(crn) if crn else "",
                     "ep1": {"nota": None, "detalles": []},
                     "ep2": {"nota": None, "detalles": []},

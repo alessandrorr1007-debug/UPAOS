@@ -211,9 +211,10 @@ class BannerSSOService:
     def get_courses_con_notas(self, session: requests.Session, term: str, level: str = "UG") -> dict:
         """
         GET /courses y, para CADA curso, llama internamente a
-        get_course_grade_detail() para extraer la nota REAL de sus componentes
-        EVALUACION PARCIAL y EVALUACION FINAL. Devuelve la lista de cursos
-        enriquecida con los campos 'parcial' y 'final' (float o None).
+        get_course_grade_detail() para calcular la NOTA ACTUAL progresiva
+        (promedio ponderado de los componentes EP1/Parcial/EP2/Final con nota,
+        normalizado por la suma de sus pesos). Devuelve la lista de cursos
+        enriquecida con el campo 'nota_actual' (float o None).
         Costo: 1 llamada componentDetails por curso (HTTP directa, sin navegador).
         """
         result = self.get_courses(session, term, level)
@@ -239,12 +240,11 @@ class BannerSSOService:
             )
             if crn:
                 detail = self.get_course_grade_detail(session, term, str(crn))
-                parcial, final = self._extraer_parcial_final(detail)
-                curso["parcial"] = parcial
-                curso["final"] = final
+                componentes = self._extraer_componentes_con_peso(detail)
+                curso["nota_actual"] = self._calcular_nota_actual(componentes)
             enriquecidos.append(curso)
 
-        print(f"[Banner Log] Cursos enriquecidos con parcial/final reales: {len(enriquecidos)}")
+        print(f"[Banner Log] Cursos enriquecidos con nota_actual: {len(enriquecidos)}")
         return {
             "success": True,
             "totalCount": len(enriquecidos),
@@ -285,67 +285,75 @@ class BannerSSOService:
         return False
 
     @staticmethod
-    def _es_componente_parcial(componente: dict) -> bool:
-        """Detecta el componente de evaluación parcial (EVP / 'EVALUACION PARCIAL')."""
-        for clave in ("description", "nombre", "codigo", "componente"):
-            val = componente.get(clave)
-            if val:
-                txt = str(val).upper()
-                if "PARCIAL" in txt or "EVP" in txt:
-                    return True
-        return False
+    def _peso_componente(componente: dict) -> float | None:
+        """
+        Peso oficial del componente según el sistema UPAO:
+        EP1=20, Parcial=30, EP2=20, Final=30.
+        Devuelve None si el componente no corresponde a una evaluación ponderada.
+        """
+        texto = " ".join(
+            str(componente.get(k) or "") for k in ("description", "nombre", "codigo", "componente")
+        ).upper()
+        if "FINAL" in texto or "EVF" in texto:
+            return 30.0
+        if "PARCIAL" in texto or "EVP" in texto:
+            return 30.0
+        if "EP2" in texto or "PROCESO 2" in texto:
+            return 20.0
+        if "EP1" in texto or "PROCESO 1" in texto:
+            return 20.0
+        return None
 
     @staticmethod
-    def _extraer_parcial_final(detail_result: dict) -> tuple:
+    def _extraer_componentes_con_peso(detail_result: dict) -> list:
         """
-        Extrae la nota real del componente 'EVALUACION PARCIAL' y
-        'EVALUACION FINAL' desde el resultado de get_course_grade_detail().
-        Devuelve (parcial, final), cada uno float o None.
-        None = el componente no existe en la respuesta o su nota está en null.
+        Devuelve los componentes ponderados (EP1, Parcial, EP2, Final) que YA
+        tienen nota registrada, como [{'nota': float, 'peso': float}, ...].
         """
-        parcial = None
-        final = None
+        componentes = []
         for c in detail_result.get("detalles", []):
             if not isinstance(c, dict):
+                continue
+            peso = BannerSSOService._peso_componente(c)
+            if peso is None:
                 continue
             nota = BannerSSOService._parse_float(c.get("puntaje_obtenido"))
             if nota is None:
                 continue
-            texto = " ".join(
-                str(c.get(k) or "") for k in ("description", "nombre", "codigo", "componente")
-            ).upper()
-            if "PARCIAL" in texto or "EVP" in texto:
-                if parcial is None:
-                    parcial = nota
-            elif "FINAL" in texto or "EVF" in texto:
-                if final is None:
-                    final = nota
-        return parcial, final
+            componentes.append({"nota": nota, "peso": peso})
+        return componentes
+
+    @staticmethod
+    def _calcular_nota_actual(componentes_con_peso: list) -> float | None:
+        """
+        Promedio ponderado progresivo: usa SOLO los componentes con nota y
+        normaliza por la suma de sus pesos (peso relativo entre lo disponible).
+        Ej: EP1=15 y Parcial=14 -> (15*20 + 14*30) / (20+30) = 14.4
+        Devuelve None si ningún componente tiene nota.
+        """
+        suma_ponderada = 0.0
+        suma_pesos = 0.0
+        for c in componentes_con_peso:
+            suma_ponderada += c["nota"] * c["peso"]
+            suma_pesos += c["peso"]
+        if suma_pesos <= 0:
+            return None
+        return round(suma_ponderada / suma_pesos, 2)
 
     @staticmethod
     def _calcular_promedio_general(cursos: list) -> tuple:
         """
-        Promedio simple de las notas FINALES disponibles; si ninguna existe,
-        usa las notas PARCIALES como respaldo. Devuelve (promedio, base) donde
-        base es 'final', 'parcial' o None si no hay ninguna nota disponible.
-        Nunca devuelve 0 falso: si no hay notas, promedio = None.
+        Promedio simple de las notas actuales (nota_actual) disponibles por curso.
+        Devuelve (promedio, base) con base 'nota_actual', o None si no hay notas.
+        Nunca devuelve 0 falso.
         """
-        finals = []
+        notas = []
         for c in cursos:
-            nota = BannerSSOService._parse_float(c.get("final"))
+            nota = BannerSSOService._parse_float(c.get("nota_actual"))
             if nota is not None:
-                finals.append(nota)
-        if finals:
-            return round(sum(finals) / len(finals), 2), "final"
-
-        parciales = []
-        for c in cursos:
-            nota = BannerSSOService._parse_float(c.get("parcial"))
-            if nota is not None:
-                parciales.append(nota)
-        if parciales:
-            return round(sum(parciales) / len(parciales), 2), "parcial"
-
+                notas.append(nota)
+        if notas:
+            return round(sum(notas) / len(notas), 2), "nota_actual"
         return None, None
 
     @staticmethod
