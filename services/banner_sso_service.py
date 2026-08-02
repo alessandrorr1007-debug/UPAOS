@@ -81,7 +81,6 @@ class BannerSSOService:
     def get_periodos(self, session: requests.Session) -> dict:
         """
         GET /term?filter=&page=1&max=50 -> Lista de periodos disponibles en Banner SSB.
-        Filtra y descarta elementos cuyo 'code' sea igual a '-1' (All Terms).
         """
         try:
             url = f"{self.ssb_base_url}/term?filter=&page=1&max=50"
@@ -103,7 +102,6 @@ class BannerSSOService:
                         code = item.get("code") or item.get("termCode") or item.get("id") or item.get("term")
                         desc = item.get("description") or item.get("termDescription") or item.get("desc") or ""
                         
-                        # Filtrar obligatoriamente cualquier elemento con código "-1" o sin código
                         if not code or str(code).strip() == "-1":
                             continue
 
@@ -121,8 +119,7 @@ class BannerSSOService:
 
     def get_niveles(self, session: requests.Session, term: str) -> dict:
         """
-        GET /level?filter=&term={term} -> Lista de niveles/currículas disponibles.
-        Filtra y descarta elementos cuyo 'code' sea igual a '-1' (All Course Levels).
+        GET /level?filter=&term={term} -> Lista de niveles disponibles (UG = PREGRADO).
         """
         try:
             url = f"{self.ssb_base_url}/level?filter=&term={term}"
@@ -144,7 +141,6 @@ class BannerSSOService:
                         code = item.get("code") or item.get("levelCode") or item.get("id")
                         desc = item.get("description") or item.get("levelDescription") or item.get("desc") or ""
                         
-                        # Filtrar obligatoriamente cualquier elemento con código "-1" o sin código
                         if not code or str(code).strip() == "-1":
                             continue
 
@@ -181,7 +177,6 @@ class BannerSSOService:
     def get_courses(self, session: requests.Session, term: str, level: str = "UG") -> dict:
         """
         GET /courses?termCode={term}&levelCode={level}&filterText=&pageOffset=0&pageMaxSize=50&sortColumn=-1&sortDirection=-1
-        Consulta la lista de cursos del periodo y nivel indicados (por defecto 'UG' para PREGRADO).
         """
         try:
             self.select_term_context(session, term)
@@ -203,15 +198,50 @@ class BannerSSOService:
         except Exception as e:
             return {"success": False, "message": f"Excepción en get_courses: {e}"}
 
-    def get_course_grade_detail(self, session: requests.Session, course_id: str, term: str) -> dict:
+    def get_course_grade_detail(self, session: requests.Session, term: str, level: str, crn: str) -> dict:
         """
-        PENDIENTE: confirmar URL real con DevTools al expandir un curso en la interfaz de Banner (hasComponent="Y").
+        Consulta el detalle de notas/componentes (EP1, Parcial, EP2, Final, Prácticas, etc.) de un curso desplegado.
+        Prueba los endpoints estándares de componentes de Banner SSB:
+        1. /components?termCode={term}&levelCode={level}&courseReferenceNumber={crn}
+        2. /courseGrades?termCode={term}&levelCode={level}&courseReferenceNumber={crn}
+        3. /components?termCode={term}&courseReferenceNumber={crn}
         """
+        endpoints = [
+            f"{self.ssb_base_url}/components?termCode={term}&levelCode={level}&courseReferenceNumber={crn}",
+            f"{self.ssb_base_url}/courseGrades?termCode={term}&levelCode={level}&courseReferenceNumber={crn}",
+            f"{self.ssb_base_url}/components?termCode={term}&courseReferenceNumber={crn}"
+        ]
+
+        session.headers.update({
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": self.ssb_base_url
+        })
+
+        for url in endpoints:
+            try:
+                print(f"[Banner Log] Probando endpoint de desgloses: {url}")
+                res = session.get(url)
+                print(f"[Banner Log] HTTP Status: {res.status_code}")
+                if res.status_code == 200:
+                    try:
+                        data = res.json()
+                        return {
+                            "success": True,
+                            "url_usada": url,
+                            "detalles": data
+                        }
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[Banner Warning] Error consultando {url}: {e}")
+
+        # Retorno amigable si la URL aún está por descubrirse con DevTools
         return {
             "success": False,
             "status": "PENDIENTE_CONFIRMAR_URL",
-            "message": "Función preparada. Pendiente obtener URL exacta de componentes vía DevTools.",
-            "detalles": None
+            "message": "Arquitectura lista. Pendiente capturar la URL exacta de desgloses vía DevTools al expandir el curso.",
+            "detalles": []
         }
 
 banner_sso_service = BannerSSOService()

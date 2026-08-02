@@ -21,8 +21,13 @@ class ManualCaptchaRequest(BaseModel):
     codigo_manual: str
 
 class NotasBuscarRequest(BaseModel):
-    periodo: str = Field(default="202690")
-    carrera: str = Field(default="UB")
+    periodo: str = Field(default="202610")
+    carrera: str = Field(default="UG")
+
+class NotasDetalleRequest(BaseModel):
+    periodo: str = Field(..., description="Código del periodo, ej. 202610")
+    carrera: str = Field(default="UG", description="Nivel, ej. UG")
+    crn: str = Field(..., description="courseReferenceNumber o ID del curso")
 
 class AutoCheckSetting(BaseModel):
     enabled: bool
@@ -79,17 +84,16 @@ def get_periodos(authorization: str = Header(..., alias="Authorization")):
     if banner_res.get("success"):
         return banner_res
         
-    # Fallback si no hay sesión Banner activa
     now = datetime.now()
     year = now.year
     semestre = "I" if now.month < 8 else "II"
     return {
         "periodo_actual": f"{year}-{semestre}",
-        "periodos": [{"code": f"{year}90", "description": f"{year}-I"}, {"code": f"{year}10", "description": f"{year-1}-II"}]
+        "periodos": [{"code": f"{year}10", "description": f"{year}-I"}, {"code": f"{year-1}20", "description": f"{year-1}-II"}]
     }
 
 @app.get("/notas/carreras")
-def get_carreras(term: str = "202690", authorization: str = Header(..., alias="Authorization")):
+def get_carreras(term: str = "202610", authorization: str = Header(..., alias="Authorization")):
     token = authorization.replace("Bearer ", "").strip()
     session = ACTIVE_SESSIONS.get(token)
     if not session:
@@ -99,7 +103,7 @@ def get_carreras(term: str = "202690", authorization: str = Header(..., alias="A
     if banner_res.get("success"):
         return banner_res
 
-    return {"carreras": [{"code": "UB", "description": "PREGRADO"}]}
+    return {"carreras": [{"code": "UG", "description": "PREGRADO"}]}
 
 @app.post("/notas/buscar")
 def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias="Authorization")):
@@ -111,6 +115,16 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
     result = banner_sso_service.get_courses(session, req.periodo, req.carrera)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Error al obtener cursos"))
+    return result
+
+@app.post("/notas/detalle")
+def buscar_detalle_curso(req: NotasDetalleRequest, authorization: str = Header(..., alias="Authorization")):
+    token = authorization.replace("Bearer ", "").strip()
+    session = ACTIVE_SESSIONS.get(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
+
+    result = banner_sso_service.get_course_grade_detail(session, req.periodo, req.carrera, req.crn)
     return result
 
 @app.patch("/settings/auto-check")
@@ -146,7 +160,7 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
     token = login_res.get("token")
     session = ACTIVE_SESSIONS.get(token)
     if session:
-        notas = banner_sso_service.get_courses(session, "202690", "UB")
+        notas = banner_sso_service.get_courses(session, "202610", "UG")
         user.ultimo_snapshot_notas = json.dumps(notas)
         db.commit()
         return {"success": True, "notas": notas}
