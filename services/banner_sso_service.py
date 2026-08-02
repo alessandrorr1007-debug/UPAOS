@@ -6,6 +6,7 @@ import json
 class BannerSSOService:
     def __init__(self):
         self.ssb_base_url = "https://ssb.upao.edu.pe/StudentSelfService/ssb/studentGrades"
+        self.component_base_url = "https://ssb.upao.edu.pe/StudentSelfService/componentDetails"
         self.sso_login_url = "https://upaosso.upao.edu.pe:410/Account/Login"
 
     def login_sso(self, username: str, password: str) -> tuple[bool, str, requests.Session | None]:
@@ -206,36 +207,184 @@ class BannerSSOService:
             print(f"[Banner Error] Excepción en get_courses: {e}")
             return {"success": False, "message": f"Excepción en get_courses: {e}"}
 
-    def get_course_grade_detail(self, session: requests.Session, term: str, level: str, crn: str) -> dict:
-        endpoints = [
-            f"{self.ssb_base_url}/components?termCode={term}&levelCode={level}&courseReferenceNumber={crn}",
-            f"{self.ssb_base_url}/courseGrades?termCode={term}&levelCode={level}&courseReferenceNumber={crn}",
-            f"{self.ssb_base_url}/components?termCode={term}&courseReferenceNumber={crn}"
-        ]
+    @staticmethod
+    def _extraer_valor(item: dict, keys) -> object:
+        """Devuelve el primer valor no None entre las claves candidatas."""
+        for key in keys:
+            value = item.get(key)
+            if value is not None:
+                return value
+        return None
+
+    def _normalizar_componente(self, item: dict) -> dict:
+        """
+        Normaliza un item real de componentDetails/subComponentDetails
+        (net.hedtech.banner.student.ComponentDetailsDecorator).
+        """
+        component_id = self._extraer_valor(item, ["componentId", "componentID", "id"])
+        nombre = str(self._extraer_valor(item, [
+            "description", "componentDescription", "name", "componentName", "title"
+        ]) or "Componente")
+        codigo = self._extraer_valor(item, ["name", "componentName", "componentCode"])
+        peso = self._extraer_valor(item, ["weight", "weightPercent", "percentWeight", "gradeWeight"])
+        porcentaje_logrado = self._extraer_valor(item, ["percentage", "percentAchieved"])
+        obtenido = self._extraer_valor(item, [
+            "grade", "score", "pointsEarned", "earnedPoints", "gradeEarned",
+            "midtermGrade", "finalGrade", "calculatedFinalGrade"
+        ])
+        score_raw = self._extraer_valor(item, ["score", "pointsEarned", "earnedPoints"])
+        sobre = self._extraer_valor(item, [
+            "totalScore", "possible", "maxPoints", "totalPoints", "pointPossible", "maxScore"
+        ])
+        has_sub_raw = self._extraer_valor(item, [
+            "hasSubComponents", "hasSubcomponents", "hasSubComponent", "hasComponents", "hasChildren"
+        ])
+        sub_count = self._extraer_valor(item, ["subComponentCount"])
+
+        has_sub_bool = bool(has_sub_raw) and str(has_sub_raw).upper() not in ("N", "0", "FALSE", "NO", "NONE")
+        try:
+            if int(sub_count or 0) > 0:
+                has_sub_bool = True
+        except (TypeError, ValueError):
+            pass
+
+        return {
+            "nombre": nombre,
+            "codigo": str(codigo) if codigo is not None else None,
+            "peso": peso,
+            "porcentaje_logrado": porcentaje_logrado,
+            "puntaje_obtenido": obtenido,
+            "puntaje_sobre": sobre,
+            "score": score_raw,
+            "componentId": component_id,
+            "hasSubComponents": has_sub_bool,
+            "subcomponentes": [],
+            # Aliases de compatibilidad con la app Android (GradesScreen.kt)
+            "description": nombre,
+            "grade": obtenido,
+            "componente": nombre,
+            "nota": obtenido,
+            "raw": item
+        }
+
+    def get_subcomponent_details(self, session: requests.Session, term: str, crn: str, component_id) -> dict:
+        """
+        GET subComponentDetails (API JSON directa de Banner, confirmada con DevTools):
+        https://ssb.upao.edu.pe/StudentSelfService/componentDetails/subComponentDetails
+        Devuelve los sub-componentes de un componente (ej. dentro de EP1:
+        'CL - Control de Laboratorio').
+        """
+        url = (
+            f"{self.component_base_url}/subComponentDetails?selectedTerm={term}"
+            f"&selectedCrn={crn}&selectedComponentId={component_id}"
+            f"&filterText=&pageOffset=0&pageMaxSize=20&sortColumn=name&sortDirection=asc"
+        )
+        print(f"[Banner Diagnostic] GET subComponentDetails: {url}")
 
         session.headers.update({
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": self.ssb_base_url
+            "Referer": f"{self.component_base_url}/componentDetails"
         })
 
-        for url in endpoints:
-            try:
-                res = session.get(url)
-                if res.status_code == 200:
-                    try:
-                        data = res.json()
-                        return {"success": True, "url_usada": url, "detalles": data}
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        try:
+            res = session.get(url, timeout=15)
+            print(f"[Banner Log] GET subComponentDetails -> HTTP Status: {res.status_code}")
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("data", []) if isinstance(data, dict) else data
+                if isinstance(items, list):
+                    subcomponentes = [
+                        self._normalizar_componente(item)
+                        for item in items if isinstance(item, dict)
+                    ]
+                    return {"success": True, "subcomponentes": subcomponentes, "raw": data}
+                return {"success": False, "status": "FORMATO_INESPERADO", "subcomponentes": []}
+            return {
+                "success": False,
+                "status": f"HTTP_{res.status_code}",
+                "message": f"Error HTTP {res.status_code} en subComponentDetails",
+                "subcomponentes": []
+            }
+        except Exception as e:
+            print(f"[Banner Error] Excepción en get_subcomponent_details: {e}")
+            return {
+                "success": False,
+                "status": "EXCEPCION",
+                "message": f"Excepción en get_subcomponent_details: {e}",
+                "subcomponentes": []
+            }
 
-        return {
-            "success": False,
-            "status": "PENDIENTE_CONFIRMAR_URL",
-            "message": "Arquitectura lista. Pendiente capturar la URL exacta de desgloses vía DevTools.",
-            "detalles": []
-        }
+    def get_course_grade_detail(self, session: requests.Session, term: str, crn: str) -> dict:
+        """
+        GET componentDetails (API JSON directa de Banner, 1 sola llamada HTTP):
+        https://ssb.upao.edu.pe/StudentSelfService/componentDetails/componentDetails
+        Reutiliza la sesión ya autenticada (cookies). Sin Playwright ni navegador.
+        Para cada componente con hasSubComponents, hace 1 GET adicional a
+        subComponentDetails (2 llamadas HTTP en total).
+        """
+        url = (
+            f"{self.component_base_url}/componentDetails?selectedTerm={term}"
+            f"&selectedCrn={crn}&filterText=&pageOffset=0&pageMaxSize=20"
+            f"&sortColumn=name&sortDirection=asc"
+        )
+        print(f"[Banner Diagnostic] GET componentDetails: {url}")
+
+        session.headers.update({
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self.component_base_url}/componentDetails"
+        })
+
+        try:
+            res = session.get(url, timeout=15)
+            print(f"[Banner Log] GET componentDetails -> HTTP Status: {res.status_code}")
+            if res.status_code != 200:
+                return {
+                    "success": False,
+                    "status": f"HTTP_{res.status_code}",
+                    "message": f"Error HTTP {res.status_code} al consultar componentDetails",
+                    "detalles": []
+                }
+
+            data = res.json()
+            items = data.get("data", []) if isinstance(data, dict) else data
+            if not isinstance(items, list):
+                return {
+                    "success": False,
+                    "status": "FORMATO_INESPERADO",
+                    "message": "La respuesta de componentDetails no contiene la lista 'data'.",
+                    "raw": data,
+                    "detalles": []
+                }
+
+            componentes = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                comp = self._normalizar_componente(item)
+
+                if comp["hasSubComponents"]:
+                    sub_res = self.get_subcomponent_details(
+                        session, term, crn, comp["componentId"]
+                    )
+                    comp["subcomponentes"] = sub_res.get("subcomponentes", [])
+
+                componentes.append(comp)
+
+            print(f"[Banner Log] componentDetails OK: {len(componentes)} componentes para CRN {crn}.")
+            return {
+                "success": True,
+                "totalCount": len(componentes),
+                "detalles": componentes
+            }
+        except Exception as e:
+            print(f"[Banner Error] Excepción en get_course_grade_detail: {e}")
+            return {
+                "success": False,
+                "status": "EXCEPCION",
+                "message": f"Excepción en get_course_grade_detail: {e}",
+                "detalles": []
+            }
 
 banner_sso_service = BannerSSOService()

@@ -50,6 +50,25 @@ def main():
         print(f"\n=== RESULTADO FINAL DE CURSOS DEL PERIODO {selected_term} / NIVEL {selected_level} (Total: {courses_res.get('totalCount')}) ===")
         print(json.dumps(courses_res, indent=2, ensure_ascii=False))
 
+        cursos = courses_res.get("cursos", [])
+        selected_course = next(
+            (c for c in cursos if isinstance(c, dict) and str(c.get("hasComponent", "")).upper() == "Y"),
+            None
+        )
+        if selected_course is None and cursos:
+            selected_course = next((c for c in cursos if isinstance(c, dict)), None)
+
+        print(f"\n7. Consultando desglose por componentes (GET componentDetails) del primer curso con hasComponent='Y'...")
+        if selected_course is None:
+            print("[Warning] No se encontraron cursos para consultar el desglose.")
+            return
+
+        detail_crn = selected_course.get("courseReferenceNumber") or selected_course.get("crn") or selected_course.get("id")
+        print(f"Curso seleccionado: {selected_course.get('courseTitle')} (CRN: {detail_crn})")
+        detail_res = banner_sso_service.get_course_grade_detail(session, selected_term, str(detail_crn))
+        print(f"\n=== RESULTADO DE DESGLOSE DE COMPONENTES (termCode={selected_term}, CRN={detail_crn}) ===")
+        print(json.dumps(detail_res, indent=2, ensure_ascii=False))
+
     else:
         print("\n[FALLO] El inicio de sesión SSO falló. Verifique credenciales.")
 

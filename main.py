@@ -4,7 +4,7 @@ import traceback
 from datetime import datetime
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from config import settings
 from database import get_db, UserSetting, encrypt_password, decrypt_password
@@ -43,9 +43,11 @@ class NotasBuscarRequest(BaseModel):
     carrera: str = Field(default="UG")
 
 class NotasDetalleRequest(BaseModel):
-    periodo: str = Field(..., description="Código del periodo, ej. 202610")
-    carrera: str = Field(default="UG", description="Nivel, ej. UG")
-    crn: str = Field(..., description="courseReferenceNumber o ID del curso")
+    # Nombres reales del JSON de Banner /courses. Se aceptan también los alias
+    # "periodo"/"crn" que envía la app Android actual (populate_by_name=True).
+    model_config = ConfigDict(populate_by_name=True)
+    termCode: str = Field(..., description="termCode del periodo, ej. 202610", alias="periodo")
+    courseReferenceNumber: str = Field(..., description="courseReferenceNumber del curso (viene en el JSON de /courses)", alias="crn")
 
 class AutoCheckSetting(BaseModel):
     enabled: bool
@@ -197,7 +199,8 @@ def buscar_detalle_curso(req: NotasDetalleRequest, authorization: str = Header(.
     if not session:
         raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
 
-    result = banner_sso_service.get_course_grade_detail(session, req.periodo, req.carrera, req.crn)
+    print(f"[POST /notas/detalle] termCode={req.termCode}, courseReferenceNumber={req.courseReferenceNumber}")
+    result = banner_sso_service.get_course_grade_detail(session, req.termCode, req.courseReferenceNumber)
     return result
 
 @app.patch("/settings/auto-check")
