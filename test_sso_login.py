@@ -1,5 +1,6 @@
 import sys
 import json
+import time
 from services.banner_sso_service import banner_sso_service
 
 def main():
@@ -45,12 +46,30 @@ def main():
         level_desc = selected_level_obj.get("description")
         print(f"\n5. Seleccionado Nivel Oficial: {level_desc} (Código: {selected_level})")
 
-        print(f"\n6. Consultando Lista de Cursos (GET /courses?termCode={selected_term}&levelCode={selected_level})...")
-        courses_res = banner_sso_service.get_courses(session, selected_term, selected_level)
-        print(f"\n=== RESULTADO FINAL DE CURSOS DEL PERIODO {selected_term} / NIVEL {selected_level} (Total: {courses_res.get('totalCount')}) ===")
+        print(f"\n6. Consultando Lista de Cursos enriquecida con PARCIAL/FINAL reales (GET /courses + componentDetails por curso)...")
+        t0 = time.time()
+        courses_res = banner_sso_service.get_courses_con_notas(session, selected_term, selected_level)
+        t1 = time.time()
+        print(f"Tiempo total (cursos + {courses_res.get('totalCount')} llamadas componentDetails): {t1 - t0:.2f}s")
+        print(f"\n=== RESULTADO DE CURSOS ENRIQUECIDOS DEL PERIODO {selected_term} / NIVEL {selected_level} (Total: {courses_res.get('totalCount')}) ===")
         print(json.dumps(courses_res, indent=2, ensure_ascii=False))
 
         cursos = courses_res.get("cursos", [])
+        resumen = [
+            {
+                "nombre": (c.get("courseTitle") or c.get("subjectDescription") or c.get("courseNumber") or "Curso"),
+                "crn": (c.get("courseReferenceNumber") or c.get("crn") or c.get("id")),
+                "parcial": c.get("parcial"),
+                "final": c.get("final"),
+            }
+            for c in cursos if isinstance(c, dict)
+        ]
+        print(f"\n=== RESUMEN PARCIAL/FINAL POR CURSO ===")
+        print(json.dumps(resumen, indent=2, ensure_ascii=False))
+
+        promedio_general, promedio_basado_en = banner_sso_service._calcular_promedio_general(cursos)
+        print(f"\n=== PROMEDIO GENERAL: {promedio_general} (basado en: {promedio_basado_en}) ===")
+
         selected_course = next(
             (c for c in cursos if isinstance(c, dict) and str(c.get("hasComponent", "")).upper() == "Y"),
             None

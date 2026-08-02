@@ -157,7 +157,7 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
         print(f"[ERROR /notas/buscar] Sesión no encontrada en ACTIVE_SESSIONS.")
         raise HTTPException(status_code=401, detail="Sesión expirada o token inválido.")
 
-    result = banner_sso_service.get_courses(session, req.periodo, req.carrera)
+    result = banner_sso_service.get_courses_con_notas(session, req.periodo, req.carrera)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Error al consultar cursos en Banner"))
 
@@ -172,8 +172,15 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
         for item in raw_cursos:
             if isinstance(item, dict):
                 course_title = item.get("courseTitle") or item.get("subjectDescription") or item.get("courseNumber") or item.get("nombre") or "Curso"
-                parcial_grade = item.get("midtermGrade") or item.get("parcial")
-                final_grade = item.get("finalGrade") or item.get("historyFinalGrade") or item.get("calculatedFinalGrade") or item.get("final")
+                # 'parcial' y 'final' vienen enriquecidos desde los componentes reales
+                # (get_courses_con_notas). Solo se respalda en midterm/finalGrade de
+                # Banner si el enriquecido vino vacío.
+                parcial_grade = item.get("parcial")
+                final_grade = item.get("final")
+                if parcial_grade is None:
+                    parcial_grade = item.get("midtermGrade")
+                if final_grade is None:
+                    final_grade = item.get("finalGrade") or item.get("historyFinalGrade") or item.get("calculatedFinalGrade")
                 crn = item.get("courseReferenceNumber") or item.get("crn") or item.get("id")
 
                 normalized_cursos.append({
@@ -186,13 +193,17 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
                     "raw_banner": item
                 })
 
+    promedio_general, promedio_basado_en = banner_sso_service._calcular_promedio_general(normalized_cursos)
+
     response_data = {
         "periodo": req.periodo,
         "carrera": req.carrera,
         "cursos": normalized_cursos,
-        "totalCount": len(normalized_cursos)
+        "totalCount": len(normalized_cursos),
+        "promedio_general": promedio_general,
+        "promedio_basado_en": promedio_basado_en
     }
-    print(f"[SUCCESS /notas/buscar] Retornando {len(normalized_cursos)} cursos procesados a la app Android.")
+    print(f"[SUCCESS /notas/buscar] Retornando {len(normalized_cursos)} cursos + promedio_general={promedio_general} (base: {promedio_basado_en}).")
     return response_data
 
 @app.post("/notas/detalle")
