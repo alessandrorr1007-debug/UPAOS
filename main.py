@@ -1,7 +1,9 @@
 import json
 import os
+import traceback
 from datetime import datetime
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from config import settings
@@ -10,6 +12,21 @@ from services.scraper_service import scraper_service, ACTIVE_SESSIONS
 from services.banner_sso_service import banner_sso_service
 
 app = FastAPI(title=settings.APP_NAME)
+
+@app.middleware("http")
+def log_requests(request: Request, call_next):
+    print(f"\n==================== [PETICIÓN ENTRANTE: {request.method} {request.url}] ====================")
+    print(f"Headers: {dict(request.headers)}")
+    try:
+        response = call_next(request)
+        return response
+    except Exception as e:
+        print(f"[ERROR EXCEPCIÓN BACKEND]: {e}")
+        print(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Error interno en backend: {str(e)}", "traceback": traceback.format_exc()}
+        )
 
 class LoginRequest(BaseModel):
     usuario: str = Field(..., description="ID/Usuario de 9 dígitos del campus")
@@ -41,6 +58,7 @@ def read_root():
 
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
+    print(f"[Login Request] Usuario: {req.usuario}")
     result = scraper_service.login(req.usuario, req.password)
     if result.get("success"):
         existing_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
@@ -54,6 +72,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         else:
             existing_user.password_encriptada = encrypt_password(req.password)
         db.commit()
+    print(f"[Login Response]: {result}")
     return result
 
 @app.post("/login/confirmar-captcha")
@@ -74,48 +93,97 @@ def login_confirmar_captcha(req: ManualCaptchaRequest, db: Session = Depends(get
     return result
 
 @app.get("/notas/periodos")
-def get_periodos(authorization: str = Header(..., alias="Authorization")):
-    token = authorization.replace("Bearer ", "").strip()
-    session = ACTIVE_SESSIONS.get(token)
-    if not session:
-        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
-    
-    banner_res = banner_sso_service.get_periodos(session)
-    if banner_res.get("success"):
-        return banner_res
-        
-    now = datetime.now()
-    year = now.year
-    semestre = "I" if now.month < 8 else "II"
+def get_periodos(authorization: str | None = Header(None, alias="Authorization")):
+    print(f"[GET /notas/periodos] Authorization Header recibido: {authorization}")
+    session = None
+    if authorization:
+        token = authorization.replace("Bearer ", "").strip()
+        session = ACTIVE_SESSIONS.get(token)
+
+    # Si hay sesión activa en Banner SSB, consultar los periodos reales
+    if session:
+        banner_res = banner_sso_service.get_periodos(session)
+        if banner_res.get("success"):
+            raw_periodos = banner_res.get("periodos", [])
+            # Extraer lista limpia de códigos/nombres
+            periodos_str_list = [p.get("code") for p in raw_periodos if p.get("code")]
+            periodo_actual = periodos_str_list[0] if periodos_str_list else "202610"
+            return {
+                "periodo_actual": periodo_actual,
+                "periodos": periodos_str_list,
+                "detalles_periodos": raw_periodos
+            }
+
+    # Fallback predeterminado si no hay sesión aún
     return {
-        "periodo_actual": f"{year}-{semestre}",
-        "periodos": [{"code": f"{year}10", "description": f"{year}-I"}, {"code": f"{year-1}20", "description": f"{year-1}-II"}]
+        "periodo_actual": "202610",
+        "periodos": ["202610", "202520", "202510"]
     }
 
 @app.get("/notas/carreras")
-def get_carreras(term: str = "202610", authorization: str = Header(..., alias="Authorization")):
-    token = authorization.replace("Bearer ", "").strip()
-    session = ACTIVE_SESSIONS.get(token)
-    if not session:
-        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
-    
-    banner_res = banner_sso_service.get_niveles(session, term)
-    if banner_res.get("success"):
-        return banner_res
+def get_carreras(term: str = "202610", authorization: str | None = Header(None, alias="Authorization")):
+    print(f"[GET /notas/carreras] Term: {term}, Authorization: {authorization}")
+    session = None
+    if authorization:
+        token = authorization.replace("Bearer ", "").strip()
+        session = ACTIVE_SESSIONS.get(token)
 
-    return {"carreras": [{"code": "UG", "description": "PREGRADO"}]}
+    if session:
+        banner_res = banner_sso_service.get_niveles(session, term)
+        if banner_res.get("success"):
+            raw_niveles = banner_res.get("niveles", [])
+            carreras_str_list = [n.get("code") for n in raw_niveles if n.get("code")]
+            return {
+                "carreras": carreras_str_list if carreras_str_list else ["UG"],
+                "detalles_carreras": raw_niveles
+            }
+
+    return {"carreras": ["UG"]}
 
 @app.post("/notas/buscar")
 def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias="Authorization")):
     token = authorization.replace("Bearer ", "").strip()
+    print(f"[POST /notas/buscar] Token: {token[:15]}..., Periodo enviado: {req.periodo}, Nivel enviado: {req.carrera}")
+    
     session = ACTIVE_SESSIONS.get(token)
     if not session:
-        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
+        print(f"[ERROR /notas/buscar] Sesión no encontrada en ACTIVE_SESSIONS. Tokens activos: {list(ACTIVE_SESSIONS.keys())}")
+        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido. Vuelva a iniciar sesión.")
 
     result = banner_sso_service.get_courses(session, req.periodo, req.carrera)
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("message", "Error al obtener cursos"))
-    return result
+        print(f"[ERROR /notas/buscar] get_courses falló: {result}")
+        raise HTTPException(status_code=400, detail=result.get("message", "Error al consultar cursos en Banner"))
+
+    raw_cursos = result.get("cursos", [])
+    normalized_cursos = []
+
+    if isinstance(raw_cursos, list):
+        for item in raw_cursos:
+            if isinstance(item, dict):
+                course_title = item.get("courseTitle") or item.get("subjectDescription") or item.get("courseNumber") or item.get("nombre") or "Curso"
+                parcial_grade = item.get("midtermGrade") or item.get("parcial")
+                final_grade = item.get("finalGrade") or item.get("final")
+                crn = item.get("courseReferenceNumber") or item.get("crn") or item.get("id")
+
+                normalized_cursos.append({
+                    "nombre": str(course_title),
+                    "parcial": parcial_grade,
+                    "final": final_grade,
+                    "crn": str(crn) if crn else "",
+                    "ep1": {"nota": None, "detalles": []},
+                    "ep2": {"nota": None, "detalles": []},
+                    "raw_banner": item
+                })
+
+    response_data = {
+        "periodo": req.periodo,
+        "carrera": req.carrera,
+        "cursos": normalized_cursos,
+        "totalCount": len(normalized_cursos)
+    }
+    print(f"[SUCCESS /notas/buscar] Retornando {len(normalized_cursos)} cursos normalizados.")
+    return response_data
 
 @app.post("/notas/detalle")
 def buscar_detalle_curso(req: NotasDetalleRequest, authorization: str = Header(..., alias="Authorization")):
