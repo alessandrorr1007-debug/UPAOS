@@ -33,6 +33,7 @@ class CampusScraperService:
         
         captcha_res = session.get(self.captcha_url)
         captcha_bytes = captcha_res.content
+        print(f"[Backend Log] Descargada imagen de captcha. Código HTTP: {captcha_res.status_code}, Tamaño de bytes: {len(captcha_bytes)}")
         
         return session, form_data, captcha_bytes
 
@@ -45,6 +46,7 @@ class CampusScraperService:
             
         if not captcha_code:
             img_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
+            print(f"[Backend Log] OCR falló o no dio 6 caracteres. Generado base64 para fallback. Longitud base64: {len(img_b64)}")
             return {
                 "success": False,
                 "necesita_captcha": True,
@@ -73,6 +75,7 @@ class CampusScraperService:
             }
         else:
             img_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
+            print(f"[Backend Log] Credenciales o captcha rechazado por el campus. Generado base64 para fallback. Longitud base64: {len(img_b64)}")
             return {
                 "success": False,
                 "necesita_captcha": True,
