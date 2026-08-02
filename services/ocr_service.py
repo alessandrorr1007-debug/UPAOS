@@ -1,9 +1,10 @@
 import io
+import os
 import pytesseract
 from PIL import Image, ImageEnhance
 from config import settings
 
-if settings.TESSERACT_CMD:
+if settings.TESSERACT_CMD and os.path.exists(settings.TESSERACT_CMD):
     pytesseract.pytesseract.tesseract_cmd = settings.TESSERACT_CMD
 
 def process_captcha_ocr(image_bytes: bytes) -> str | None:
