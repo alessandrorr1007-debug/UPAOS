@@ -3,6 +3,7 @@ import os
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
+import requests
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -87,6 +88,87 @@ class IntervaloSetting(BaseModel):
 
 class DeviceTokenRequest(BaseModel):
     fcm_token: str
+
+# ---------------------------------------------------------------------------
+# Manejo transparente de sesiones de Banner vencidas.
+# Los tokens locales tienen el formato "sess_{usuario}_{hash}"; si la sesión
+# cacheada de Banner expiró (o el backend reinició), se hace un re-login
+# automático con la contraseña encriptada del usuario. Si eso también falla,
+# se responde 401 {"detail": "sesion_expirada"} para que la app fuerce re-login.
+# ---------------------------------------------------------------------------
+
+def _usuario_de_token(token: str) -> str | None:
+    if not token or not token.startswith("sess_"):
+        return None
+    partes = token.split("_")
+    return partes[1] if len(partes) >= 2 else None
+
+def _usuario_db_de_token(token: str, db: Session) -> UserSetting | None:
+    usuario_id = _usuario_de_token(token)
+    if not usuario_id:
+        return None
+    return db.query(UserSetting).filter(UserSetting.usuario_campus == usuario_id).first()
+
+def _renovar_sesion(token: str, user: UserSetting | None) -> bool:
+    """Re-login transparente con la contraseña encriptada guardada del usuario."""
+    if user is None:
+        return False
+    try:
+        password = decrypt_password(user.password_encriptada)
+    except Exception:
+        print(f"[Sesion] No se pudo descifrar la contraseña de {user.usuario_campus}.")
+        return False
+    try:
+        result = scraper_service.login(user.usuario_campus, password)
+    except Exception as e:
+        print(f"[Sesion] Excepción en re-login de {user.usuario_campus}: {e}")
+        return False
+    return result.get("success") and ACTIVE_SESSIONS.get(token) is not None
+
+def _sesion_garantizada(token: str, db: Session) -> requests.Session:
+    """
+    Devuelve una sesión de Banner válida para el token. Si la cacheada expiró o
+    el backend reinició, intenta re-login transparente. Si no es posible, lanza
+    HTTP 401 con detail='sesion_expirada'.
+    """
+    session = ACTIVE_SESSIONS.get(token)
+    valida = session is not None and scraper_service._sesion_sigue_valida(session)
+    if not valida:
+        user = _usuario_db_de_token(token, db)
+        if user is None or not _renovar_sesion(token, user):
+            raise HTTPException(status_code=401, detail="sesion_expirada")
+        session = ACTIVE_SESSIONS.get(token)
+        if session is None:
+            raise HTTPException(status_code=401, detail="sesion_expirada")
+    return session
+
+def _llamar_banner(token: str, db: Session, func, *args):
+    """
+    Ejecuta func(session, *args) con una sesión garantizada. Si la llamada falla
+    (la sesión pudo caducar a mitad de la petición), hace un re-login transparente
+    y reintenta UNA vez. Si el re-login falla -> 401 sesion_expirada; si el
+    reintento falla pese a sesión nueva -> error genérico 400 de Banner.
+    """
+    session = _sesion_garantizada(token, db)
+    result = func(session, *args)
+    if result.get("success"):
+        return result
+
+    user = _usuario_db_de_token(token, db)
+    if user is not None and _renovar_sesion(token, user):
+        session = ACTIVE_SESSIONS.get(token)
+        if session is not None:
+            reintento = func(session, *args)
+            if reintento.get("success"):
+                print(f"[Sesion] Reintento exitoso tras re-login para {user.usuario_campus}.")
+                return reintento
+            result = reintento
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("message", "Error al consultar Banner"),
+            )
+
+    raise HTTPException(status_code=401, detail="sesion_expirada")
 
 @app.get("/")
 def read_root():
@@ -188,18 +270,16 @@ def get_carreras(term: str = "202610", authorization: str | None = Header(None, 
     return {"carreras": ["UG"]}
 
 @app.post("/notas/buscar")
-def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias="Authorization")):
+def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias="Authorization"), db: Session = Depends(get_db)):
     token = authorization.replace("Bearer ", "").strip()
     print(f"[POST /notas/buscar] Token: {token[:15]}..., Periodo: {req.periodo}, Nivel: {req.carrera}")
-    
-    session = ACTIVE_SESSIONS.get(token)
-    if not session:
-        print(f"[ERROR /notas/buscar] Sesión no encontrada en ACTIVE_SESSIONS.")
-        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido.")
 
-    result = banner_sso_service.get_courses_con_notas(session, req.periodo, req.carrera)
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("message", "Error al consultar cursos en Banner"))
+    # Sesión garantizada con re-login transparente (401 sesion_expirada si falla).
+    result = _llamar_banner(
+        token,
+        db,
+        func=lambda s: banner_sso_service.get_courses_con_notas(s, req.periodo, req.carrera),
+    )
 
     # Momento en que Banner respondió (la app lo muestra como "Actualizado hace X").
     ultima_actualizacion = datetime.now().isoformat()
@@ -243,25 +323,23 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
     return response_data
 
 @app.post("/notas/detalle")
-def buscar_detalle_curso(req: NotasDetalleRequest, authorization: str = Header(..., alias="Authorization")):
+def buscar_detalle_curso(req: NotasDetalleRequest, authorization: str = Header(..., alias="Authorization"), db: Session = Depends(get_db)):
     token = authorization.replace("Bearer ", "").strip()
-    session = ACTIVE_SESSIONS.get(token)
-    if not session:
-        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
 
     print(f"[POST /notas/detalle] termCode={req.termCode}, courseReferenceNumber={req.courseReferenceNumber}")
-    result = banner_sso_service.get_course_grade_detail(session, req.termCode, req.courseReferenceNumber)
+    result = _llamar_banner(
+        token,
+        db,
+        func=lambda s: banner_sso_service.get_course_grade_detail(s, req.termCode, req.courseReferenceNumber),
+    )
     return result
 
 @app.get("/asistencia")
-def get_asistencia(authorization: str = Header(..., alias="Authorization")):
+def get_asistencia(authorization: str = Header(..., alias="Authorization"), db: Session = Depends(get_db)):
     token = authorization.replace("Bearer ", "").strip()
     print(f"[GET /asistencia] Token: {token[:15]}...")
-    session = ACTIVE_SESSIONS.get(token)
-    if not session:
-        raise HTTPException(status_code=401, detail="Sesión expirada o token inválido")
 
-    result = banner_sso_service.get_attendance(session)
+    result = _llamar_banner(token, db, func=lambda s: banner_sso_service.get_attendance(s))
     print(f"[SUCCESS /asistencia] Total registros: {result.get('totalCount')}")
     return result
 
