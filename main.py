@@ -172,8 +172,8 @@ def _llamar_banner(token: str, db: Session, func, *args):
 
     raise HTTPException(status_code=401, detail="sesion_expirada")
 
-def _verificar_admin(admin_user: str, db: Session) -> UserSetting:
-    user = db.query(UserSetting).filter(UserSetting.usuario_campus == admin_user, UserSetting.is_admin.is_(True)).first()
+def _verificar_admin(admin_usuario: str, db: Session) -> UserSetting:
+    user = db.query(UserSetting).filter(UserSetting.usuario_campus == admin_usuario, UserSetting.is_admin.is_(True)).first()
     if not user:
         raise HTTPException(status_code=403, detail="Acceso denegado: requiere privilegios de administrador")
     return user
@@ -194,6 +194,26 @@ def healthz():
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     print(f"[Login Request] Usuario: {req.usuario}")
+    
+    # Login directo del Administrador (000000000 / Paul2002)
+    if req.usuario == features_service.ADMIN_USUARIO:
+        features_service.asegurar_admin(db)
+        admin_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
+        if admin_user and features_service.verificar_password_admin(admin_user, req.password):
+            admin_user.nombre = "Administrador Sistema"
+            admin_user.is_admin = True
+            db.commit()
+            token = f"sess_{req.usuario}_admin"
+            ACTIVE_SESSIONS[token] = requests.Session()
+            features_service.registrar_actividad(db, req.usuario)
+            print(f"[Login Admin Exitoso]: {req.usuario}")
+            return {
+                "success": True,
+                "token": token,
+                "usuario": req.usuario,
+                "message": "Sesión administrativa iniciada correctamente"
+            }
+
     result = scraper_service.login(req.usuario, req.password)
     if result.get("success"):
         existing_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
@@ -292,6 +312,19 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
     token = authorization.replace("Bearer ", "").strip()
     print(f"[POST /notas/buscar] Token: {token[:15]}..., Periodo: {req.periodo}, Nivel: {req.carrera}")
 
+    # Si es sesión de admin local (sin Banner SSB), devuelve lista vacía de cursos sin error 401
+    usuario_token = _usuario_de_token(token)
+    if usuario_token == features_service.ADMIN_USUARIO:
+        return {
+            "periodo": req.periodo,
+            "carrera": req.carrera,
+            "ultima_actualizacion": datetime.now().isoformat(),
+            "cursos": [],
+            "totalCount": 0,
+            "promedio_general": None,
+            "promedio_basado_en": None
+        }
+
     result = _llamar_banner(
         token,
         db,
@@ -323,7 +356,6 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
 
     promedio_general, promedio_basado_en = banner_sso_service._calcular_promedio_general(normalized_cursos)
 
-    usuario_token = _usuario_de_token(token)
     if usuario_token:
         features_service.registrar_actividad(db, usuario_token)
         ranking_cursos = []
@@ -371,9 +403,12 @@ def get_asistencia(authorization: str = Header(..., alias="Authorization"), db: 
     token = authorization.replace("Bearer ", "").strip()
     print(f"[GET /asistencia] Token: {token[:15]}...")
 
+    usuario_token = _usuario_de_token(token)
+    if usuario_token == features_service.ADMIN_USUARIO:
+        return {"asistencia": [], "totalCount": 0}
+
     result = _llamar_banner(token, db, func=lambda s: banner_sso_service.get_attendance(s))
     print(f"[SUCCESS /asistencia] Total registros: {result.get('totalCount')}")
-    usuario_token = _usuario_de_token(token)
     if usuario_token:
         features_service.registrar_actividad(db, usuario_token)
     return result
@@ -387,9 +422,12 @@ def get_horario(
     token = authorization.replace("Bearer ", "").strip()
     print(f"[GET /horario] Token: {token[:15]}... term: {term}")
 
+    usuario_token = _usuario_de_token(token)
+    if usuario_token == features_service.ADMIN_USUARIO:
+        return {"cursos": [], "total_cursos": 0}
+
     result = _llamar_banner(token, db, func=lambda s: banner_sso_service.get_horario(s, term))
     print(f"[SUCCESS /horario] Total cursos: {result.get('total_cursos')}")
-    usuario_token = _usuario_de_token(token)
     if usuario_token:
         features_service.registrar_actividad(db, usuario_token)
     return result
@@ -579,17 +617,17 @@ def admin_login(req: AdminLoginRequest, db: Session = Depends(get_db)):
     }
 
 @app.get("/admin/cuentas")
-def admin_cuentas(admin_usuario: str = "000279330", db: Session = Depends(get_db)):
+def admin_cuentas(admin_usuario: str = "000000000", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     return {"cuentas": features_service.listar_cuentas_registradas(db)}
 
 @app.get("/admin/sugerencias")
-def admin_sugerencias(admin_usuario: str = "000279330", db: Session = Depends(get_db)):
+def admin_sugerencias(admin_usuario: str = "000000000", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     return {"sugerencias": features_service.listar_todas_sugerencias(db)}
 
 @app.patch("/admin/sugerencias/{sugerencia_id}/estado")
-def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRequest, admin_usuario: str = "000279330", db: Session = Depends(get_db)):
+def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRequest, admin_usuario: str = "000000000", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     try:
         return features_service.actualizar_estado_sugerencia(db, sugerencia_id, req.estado)
@@ -597,12 +635,12 @@ def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRe
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/admin/semana")
-def admin_establecer_semana(req: AdminSemanaRequest, admin_usuario: str = "000279330", db: Session = Depends(get_db)):
+def admin_establecer_semana(req: AdminSemanaRequest, admin_usuario: str = "000000000", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     return features_service.establecer_semana_inicio(db, req.fecha_inicio)
 
 @app.get("/admin/metricas")
-def admin_metricas(admin_usuario: str = "000279330", db: Session = Depends(get_db)):
+def admin_metricas(admin_usuario: str = "000000000", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     return {
         "dau_30_dias": features_service.serie_dau(db, 30),

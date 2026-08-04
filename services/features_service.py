@@ -23,8 +23,8 @@ SUGERENCIAS_POR_DIA = 3           # 1.1: límite anti-spam de sugerencias por d�
 SUGERENCIA_MIN_LEN = 10           # 1.1: longitud mínima del texto
 SUGERENCIA_MAX_LEN = 500          # 1.1: longitud máxima del texto
 TOTAL_SEMANAS_CICLO = 16          # 1.3: semanas regulares del ciclo
-ADMIN_USUARIO = "000279330"       # 2.1: cuenta del panel de administración
-ADMIN_PASSWORD_PLAIN = "Alessandro2002"  # 2.1: password independiente del portal (bcrypt)
+ADMIN_USUARIO = "000000000"       # 2.1: cuenta del panel de administración
+ADMIN_PASSWORD_PLAIN = "Paul2002"         # 2.1: password independiente del portal (bcrypt)
 
 
 def normalizar_course_id(codigo_materia, numero_curso) -> str:
