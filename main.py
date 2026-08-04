@@ -343,6 +343,24 @@ def get_asistencia(authorization: str = Header(..., alias="Authorization"), db: 
     print(f"[SUCCESS /asistencia] Total registros: {result.get('totalCount')}")
     return result
 
+@app.get("/horario")
+def get_horario(
+    authorization: str = Header(..., alias="Authorization"),
+    term: str = "202610",
+    db: Session = Depends(get_db),
+):
+    """
+    Horario semanal de clases desde inscripcion.upao.edu.pe (getRegistrationEvents),
+    reutilizando la misma sesión SSO de Banner. Devuelve eventos agrupados por curso
+    (crn) y por día de la semana, con bloques consecutivos fusionados.
+    """
+    token = authorization.replace("Bearer ", "").strip()
+    print(f"[GET /horario] Token: {token[:15]}... term: {term}")
+
+    result = _llamar_banner(token, db, func=lambda s: banner_sso_service.get_horario(s, term))
+    print(f"[SUCCESS /horario] Total cursos: {result.get('total_cursos')}")
+    return result
+
 @app.patch("/settings/auto-check")
 def update_auto_check(req: AutoCheckSetting, usuario: str, db: Session = Depends(get_db)):
     user = db.query(UserSetting).filter(UserSetting.usuario_campus == usuario).first()

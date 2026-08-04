@@ -1,7 +1,9 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
+from datetime import date
 import json
+import re
 
 class BannerSSOService:
     def __init__(self):
@@ -9,6 +11,8 @@ class BannerSSOService:
         self.attendance_base_url = "https://ssb.upao.edu.pe/StudentSelfService/ssb/studentAttendanceTracking"
         self.component_base_url = "https://ssb.upao.edu.pe/StudentSelfService/componentDetails"
         self.sso_login_url = "https://upaosso.upao.edu.pe:410/Account/Login"
+        self.inscripcion_base_url = "https://inscripcion.upao.edu.pe/StudentRegistrationSsb/ssb"
+        self.inscripcion_login_url = "https://inscripcion.upao.edu.pe/StudentRegistrationSsb/login"
 
     def login_sso(self, username: str, password: str) -> tuple[bool, str, requests.Session | None]:
         session = requests.Session()
@@ -552,6 +556,189 @@ class BannerSSOService:
                 "status": "EXCEPCION",
                 "message": f"Excepción en get_attendance: {e}",
                 "asistencia": []
+            }
+
+    def _preparar_sesion_inscripcion(self, session: requests.Session) -> None:
+        """
+        getRegistrationEvents vive en inscripcion.upao.edu.pe (subdominio distinto
+        al de notas/asistencia). La primera visita a ese subdominio dispara un
+        intercambio SSO automático vía login.upao.edu.pe (cookies compartidas) que
+        otorga cookies propias al subdominio. Sin este GET previo, la llamada de
+        eventos se "consume" devolviendo el JSON del intercambio en vez de la lista.
+        """
+        if session is None:
+            return
+        tiene_cookie_inscripcion = any(
+            c.domain and "inscripcion.upao.edu.pe" in c.domain
+            for c in session.cookies
+        )
+        if not tiene_cookie_inscripcion:
+            print("[Banner Log] Intercambio SSO hacia inscripcion.upao.edu.pe (1 GET).")
+            try:
+                session.get(self.inscripcion_login_url, timeout=20, allow_redirects=True)
+            except Exception as e:
+                print(f"[Banner Warning] Intercambio SSO inscripcion falló: {e}")
+
+    @staticmethod
+    def _parse_fecha_horario(iso_str) -> tuple | None:
+        """
+        '2026-08-03T07:00:27-0500' -> (dia_semana, 'HH:MM') con Lunes=0.
+        El endpoint devuelve fechas que son solo una plantilla de 'la semana
+        actual'; lo único significativo es el día de la semana y la hora.
+        """
+        if not isinstance(iso_str, str):
+            return None
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})", iso_str)
+        if not m:
+            return None
+        year, month, day, hh, mm = (int(x) for x in m.groups())
+        try:
+            weekday = date(year, month, day).weekday()
+        except ValueError:
+            return None
+        return weekday, f"{hh:02d}:{mm:02d}"
+
+    @staticmethod
+    def _a_12h(hhmm: str | None) -> str | None:
+        """'07:00' -> '7:00 AM'. None si no es una hora válida."""
+        if not hhmm or ":" not in hhmm:
+            return None
+        try:
+            hh, mm = hhmm.split(":")
+            h = int(hh)
+            h12 = h % 12 or 12
+            suf = "AM" if h < 12 else "PM"
+            return f"{h12}:{mm} {suf}"
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _fusionar_bloques(bloques: list) -> list:
+        """
+        Une bloques consecutivos del mismo día (fin == inicio del siguiente)
+        en un solo rango, p. ej. dos eventos de una misma clase de 2 horas
+        continuas se muestran como un único bloque 07:00-10:00.
+        """
+        if not bloques:
+            return []
+        por_dia: dict[int, list] = {}
+        for b in bloques:
+            por_dia.setdefault(b["dia"], []).append(b)
+
+        result = []
+        for dia, lista in por_dia.items():
+            lista.sort(key=lambda b: b["hora_inicio"])
+            merged = [dict(lista[0])]
+            for b in lista[1:]:
+                ultimo = merged[-1]
+                if b["hora_inicio"] == ultimo.get("hora_fin"):
+                    ultimo["hora_fin"] = b["hora_fin"]
+                    ultimo["hora_fin_12h"] = b["hora_fin_12h"]
+                else:
+                    merged.append(dict(b))
+            result.extend(merged)
+        return result
+
+    def _agrupar_horario(self, eventos: list, term: str) -> list:
+        """
+        Agrupa los eventos crudos de getRegistrationEvents por curso (crn) y por
+        día de la semana. Devuelve una estructura simple para el frontend:
+        [{crn, codigo_materia, numero_curso, nombre, bloques:[{dia, dia_nombre,
+        hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h}]}]
+        """
+        dias_nombres = ["LUN", "MAR", "MIE", "JUE", "VIE", "SAB", "DOM"]
+        cursos: dict[str, dict] = {}
+        for ev in eventos:
+            if not isinstance(ev, dict):
+                continue
+            crn = ev.get("crn") or ev.get("courseReferenceNumber") or ev.get("id")
+            if crn is None:
+                continue
+            inicio = self._parse_fecha_horario(ev.get("start"))
+            if inicio is None:
+                continue
+            fin = self._parse_fecha_horario(ev.get("end"))
+            dia, hora_inicio = inicio
+            hora_fin = fin[1] if fin else None
+
+            clave = str(crn)
+            curso = cursos.get(clave)
+            if curso is None:
+                curso = {
+                    "crn": clave,
+                    "codigo_materia": ev.get("subject"),
+                    "numero_curso": ev.get("courseNumber"),
+                    "nombre": ev.get("title") or ev.get("courseTitle") or "Curso",
+                    "bloques": [],
+                }
+                cursos[clave] = curso
+            curso["bloques"].append({
+                "dia": dia,
+                "dia_nombre": dias_nombres[dia] if 0 <= dia < 7 else str(dia),
+                "hora_inicio": hora_inicio,
+                "hora_fin": hora_fin,
+                "hora_inicio_12h": self._a_12h(hora_inicio),
+                "hora_fin_12h": self._a_12h(hora_fin),
+            })
+
+        result = []
+        for crn, curso in cursos.items():
+            curso["bloques"] = sorted(
+                self._fusionar_bloques(curso["bloques"]),
+                key=lambda b: (b["dia"], b["hora_inicio"]),
+            )
+            result.append(curso)
+        result.sort(key=lambda c: (c["nombre"] or "").lower())
+        return result
+
+    def get_horario(self, session: requests.Session, term: str) -> dict:
+        """
+        GET getRegistrationEvents (horario semanal) de inscripcion.upao.edu.pe,
+        reutilizando la sesión SSO ya autenticada de Banner. El subdominio distinto
+        se resuelve solo mediante un intercambio SSO automático (1 GET al login).
+        El endpoint responde un array de eventos cuyas fechas son una plantilla de
+        'la semana actual': se extrae únicamente el día de la semana y la hora,
+        tratándolo como horario semanal recurrente. Se agrupa por curso y día,
+        fusionando bloques consecutivos del mismo día.
+        """
+        try:
+            self._preparar_sesion_inscripcion(session)
+
+            url = f"{self.inscripcion_base_url}/classRegistration/getRegistrationEvents"
+            session.headers.update({
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": f"{self.inscripcion_base_url}/classRegistration/classRegistration",
+            })
+            res = session.get(url, params={"termFilter": term}, timeout=20, allow_redirects=True)
+            print(f"[Banner Log] GET getRegistrationEvents (term={term}) -> HTTP Status: {res.status_code}")
+            if res.status_code != 200:
+                return {
+                    "success": False,
+                    "status": f"HTTP_{res.status_code}",
+                    "message": f"Error HTTP {res.status_code} al consultar horario",
+                    "cursos": [],
+                }
+
+            data = res.json()
+            eventos = data if isinstance(data, list) else data.get("data", [])
+            cursos = self._agrupar_horario(eventos, term)
+            print(f"[Banner Log] getRegistrationEvents OK: {len(cursos)} cursos, "
+                  f"{sum(len(c['bloques']) for c in cursos)} bloques.")
+            return {
+                "success": True,
+                "periodo": term,
+                "total_cursos": len(cursos),
+                "total_bloques": sum(len(c["bloques"]) for c in cursos),
+                "cursos": cursos,
+            }
+        except Exception as e:
+            print(f"[Banner Error] Excepción en get_horario: {e}")
+            return {
+                "success": False,
+                "status": "EXCEPCION",
+                "message": f"Excepción en get_horario: {e}",
+                "cursos": [],
             }
 
     def _normalizar_componente(self, item: dict) -> dict:
