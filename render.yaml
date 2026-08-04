@@ -1,0 +1,34 @@
+# Render Blueprint para UPAOS API.
+#
+# IMPORTANTE:
+#  - Los discos persistentes de Render requieren un plan de pago (Starter ~USD 7/mes
+#    o superior). En el plan gratuito el filesystem es efímero y app_data.db se borra
+#    en cada redeploy.
+#  - La primera vez el disco arranca vacío: el usuario deberá iniciar sesión de nuevo
+#    y volver a activar la revisión automática.
+#  - FERNET_KEY se genera como secreto al crear el servicio (no se guarda en git).
+#
+# Opción A (recomendada si el servicio ya existe): en Render > Dashboard > tu servicio
+# > Environment, agregar el Persistent Disk (mount path /var/data) y el env var:
+#   DATABASE_URL = sqlite:////var/data/app_data.db
+#
+# Opción B: este archivo sirve para crear/regenerar el servicio desde la rama master.
+
+services:
+  - type: web
+    name: upaos
+    runtime: docker
+    plan: starter
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:////var/data/app_data.db
+      - key: FERNET_KEY
+        sync: false
+      - key: TESSERACT_CMD
+        value: /usr/bin/tesseract
+    disk:
+      name: upaos-data
+      mountPath: /var/data
+      sizeGB: 1
+    healthCheckPath: /healthz
+    autoDeploy: true

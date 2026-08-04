@@ -1,4 +1,5 @@
 import requests
+import time
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from datetime import date
@@ -13,6 +14,15 @@ class BannerSSOService:
         self.sso_login_url = "https://upaosso.upao.edu.pe:410/Account/Login"
         self.inscripcion_base_url = "https://inscripcion.upao.edu.pe/StudentRegistrationSsb/ssb"
         self.inscripcion_login_url = "https://inscripcion.upao.edu.pe/StudentRegistrationSsb/login"
+        self.inscripcion_registration_history_url = (
+            f"{self.inscripcion_base_url}/registrationHistory/registrationHistory"
+        )
+        self.inscripcion_reset_registrations_url = (
+            f"{self.inscripcion_base_url}/registrationHistory/reset"
+        )
+        self.inscripcion_get_registration_events_url = (
+            f"{self.inscripcion_base_url}/classRegistration/getRegistrationEvents"
+        )
 
     def login_sso(self, username: str, password: str) -> tuple[bool, str, requests.Session | None]:
         session = requests.Session()
@@ -562,9 +572,10 @@ class BannerSSOService:
         """
         getRegistrationEvents vive en inscripcion.upao.edu.pe (subdominio distinto
         al de notas/asistencia). La primera visita a ese subdominio dispara un
-        intercambio SSO automático vía login.upao.edu.pe (cookies compartidas) que
-        otorga cookies propias al subdominio. Sin este GET previo, la llamada de
-        eventos se "consume" devolviendo el JSON del intercambio en vez de la lista.
+        intercambio SSO automático vía login.upao.edu.pe (cookies compartidas del
+        WSO2) que otorga cookies propias al subdominio. Sin este GET previo, la
+        llamada de eventos se "consume" devolviendo el JSON del intercambio en vez
+        de la lista.
         """
         if session is None:
             return
@@ -691,39 +702,148 @@ class BannerSSOService:
         result.sort(key=lambda c: (c["nombre"] or "").lower())
         return result
 
+    @staticmethod
+    def _hora_hhmm_a_formato(hhmm) -> str | None:
+        """'1950' -> '19:50'. None si no es un HHMM válido."""
+        if not isinstance(hhmm, str) or len(hhmm) != 4 or not hhmm.isdigit():
+            return None
+        return f"{hhmm[:2]}:{hhmm[2:]}"
+
+    @staticmethod
+    def _desescapar_html(valor):
+        """'Aplicaciones M&oacute;viles...' -> 'Aplicaciones Móviles...'."""
+        if not isinstance(valor, str):
+            return valor
+        from html import unescape
+        return unescape(valor)
+
+    def _agrupar_horario_desde_registros(self, registros: list, term: str) -> list:
+        """
+        Construye la estructura de horario a partir de data.registrations de
+        registrationHistory/reset (página 'View Registration Information' →
+        tab Lookup Schedule). El endpoint devuelve una fila por CRN registrado
+        (teoría/práctica van como CRNs distintos del mismo curso), cada una con
+        meetingTimes (beginTime/endTime en 'HHMM' y flags por día). Se agrupa por
+        curso (subject + courseNumber) fusionando todas sus secciones, y por día,
+        fusionando bloques consecutivos del mismo día.
+        """
+        dias_nombres = ["LUN", "MAR", "MIE", "JUE", "VIE", "SAB", "DOM"]
+        flag_dias = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        cursos: dict[str, dict] = {}
+        for reg in registros:
+            if not isinstance(reg, dict):
+                continue
+            crn = reg.get("courseReferenceNumber") or reg.get("crn")
+            subject = reg.get("subject")
+            numero = reg.get("courseNumber")
+            if crn is None and subject is None:
+                continue
+            if subject is not None and numero is not None:
+                clave = f"{subject}|{numero}"
+            else:
+                clave = f"crn:{crn}"
+            curso = cursos.get(clave)
+            if curso is None:
+                curso = {
+                    "crn": str(crn) if crn is not None else clave,
+                    "codigo_materia": subject,
+                    "numero_curso": numero,
+                    "nombre": self._desescapar_html(reg.get("courseTitle")) or "Curso",
+                    "bloques": [],
+                }
+                cursos[clave] = curso
+            for mt in reg.get("meetingTimes") or []:
+                if not isinstance(mt, dict):
+                    continue
+                inicio = self._hora_hhmm_a_formato(mt.get("beginTime"))
+                fin = self._hora_hhmm_a_formato(mt.get("endTime"))
+                if inicio is None:
+                    continue
+                for idx, flag in enumerate(flag_dias):
+                    if mt.get(flag):
+                        curso["bloques"].append({
+                            "dia": idx,
+                            "dia_nombre": dias_nombres[idx],
+                            "hora_inicio": inicio,
+                            "hora_fin": fin,
+                            "hora_inicio_12h": self._a_12h(inicio),
+                            "hora_fin_12h": self._a_12h(fin),
+                        })
+                        break
+
+        result = []
+        for crn, curso in cursos.items():
+            curso["bloques"] = sorted(
+                self._fusionar_bloques(curso["bloques"]),
+                key=lambda b: (b["dia"], b["hora_inicio"] or ""),
+            )
+            result.append(curso)
+        result.sort(key=lambda c: (c["nombre"] or "").lower())
+        return result
+
     def get_horario(self, session: requests.Session, term: str) -> dict:
         """
-        GET getRegistrationEvents (horario semanal) de inscripcion.upao.edu.pe,
-        reutilizando la sesión SSO ya autenticada de Banner. El subdominio distinto
-        se resuelve solo mediante un intercambio SSO automático (1 GET al login).
-        El endpoint responde un array de eventos cuyas fechas son una plantilla de
-        'la semana actual': se extrae únicamente el día de la semana y la hora,
-        tratándolo como horario semanal recurrente. Se agrupa por curso y día,
-        fusionando bloques consecutivos del mismo día.
+        Horario semanal de inscripcion.upao.edu.pe (Banner Student Registration),
+        página 'View Registration Information' → endpoint registrationHistory/reset
+        (tab Lookup Schedule). Reutiliza la sesión SSO de Banner; el subdominio
+        distinto se resuelve solo con el intercambio SSO automático (1 GET al login
+        del subdominio). El endpoint devuelve las inscripciones reales del periodo
+        (una fila por CRN registrado, con meetingTimes: día + hora inicio/fin) y
+        filtra correctamente por term. Si no hay registros, se intenta el
+        calendario getRegistrationEvents (requiere que el periodo esté activo en
+        la sesión).
         """
         try:
             self._preparar_sesion_inscripcion(session)
 
-            url = f"{self.inscripcion_base_url}/classRegistration/getRegistrationEvents"
             session.headers.update({
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "X-Requested-With": "XMLHttpRequest",
-                "Referer": f"{self.inscripcion_base_url}/classRegistration/classRegistration",
+                "Referer": self.inscripcion_registration_history_url,
             })
-            res = session.get(url, params={"termFilter": term}, timeout=20, allow_redirects=True)
-            print(f"[Banner Log] GET getRegistrationEvents (term={term}) -> HTTP Status: {res.status_code}")
-            if res.status_code != 200:
-                return {
-                    "success": False,
-                    "status": f"HTTP_{res.status_code}",
-                    "message": f"Error HTTP {res.status_code} al consultar horario",
-                    "cursos": [],
-                }
+            session.get(self.inscripcion_registration_history_url, timeout=20, allow_redirects=True)
 
-            data = res.json()
-            eventos = data if isinstance(data, list) else data.get("data", [])
-            cursos = self._agrupar_horario(eventos, term)
-            print(f"[Banner Log] getRegistrationEvents OK: {len(cursos)} cursos, "
+            res = session.get(
+                self.inscripcion_reset_registrations_url,
+                params={"term": term},
+                timeout=20,
+                allow_redirects=True,
+            )
+            print(f"[Banner Log] GET registrationHistory/reset (term={term}) -> HTTP Status: {res.status_code}")
+
+            registros = []
+            if res.status_code == 200:
+                try:
+                    data = res.json()
+                except (ValueError, TypeError):
+                    data = None
+                if isinstance(data, dict):
+                    registros = data.get("data", {}).get("registrations", [])
+                    if not isinstance(registros, list):
+                        registros = []
+
+            if not registros:
+                print(f"[Banner Log] Sin registros vía reset; intentando getRegistrationEvents.")
+                res = session.get(
+                    self.inscripcion_get_registration_events_url,
+                    params={"termFilter": term},
+                    timeout=20,
+                    allow_redirects=True,
+                )
+                print(f"[Banner Log] GET getRegistrationEvents (term={term}) -> HTTP Status: {res.status_code}")
+                eventos = []
+                if res.status_code == 200:
+                    try:
+                        data = res.json()
+                    except (ValueError, TypeError):
+                        data = None
+                    if isinstance(data, list):
+                        eventos = data
+                cursos = self._agrupar_horario(eventos, term)
+            else:
+                cursos = self._agrupar_horario_desde_registros(registros, term)
+
+            print(f"[Banner Log] Horario OK: {len(cursos)} cursos, "
                   f"{sum(len(c['bloques']) for c in cursos)} bloques.")
             return {
                 "success": True,
