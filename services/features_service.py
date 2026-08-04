@@ -1,6 +1,7 @@
 import re
 import unicodedata
 from datetime import date, datetime, timedelta
+from bs4 import BeautifulSoup
 
 import bcrypt
 from sqlalchemy.orm import Session
@@ -96,7 +97,7 @@ def semana_academica(db: Session) -> dict:
     }
 
 
-def establecer_semana_inicio(db: Session, fecha_inicio) -> dict:
+def establecer_semana_inicio(db: Session, fecha_inicio: str) -> dict:
     reg = db.query(GlobalSetting).filter(GlobalSetting.clave == "ciclo_inicio_fecha").first()
     if reg is None:
         reg = GlobalSetting(clave="ciclo_inicio_fecha", valor=fecha_inicio)
@@ -194,12 +195,6 @@ def set_ranking_optin(db: Session, usuario: str, enabled: bool) -> dict:
 
 
 def registrar_cursos_ranking(db: Session, usuario: str, ciclo: str, cursos: list) -> int:
-    """
-    Upsert de las notas anónimas por curso para el ranking. Solo actúa si el
-    usuario tiene el opt-in global activo (1.2). 'cursos' son dicts con
-    course_id, course_name y nota. Se guarda el valor para el ranking sin
-    vincularlo públicamente al usuario (la tabla es anónima).
-    """
     user = db.query(UserSetting).filter(UserSetting.usuario_campus == usuario).first()
     if user is None or not user.ranking_optin:
         return 0
@@ -238,7 +233,6 @@ def registrar_cursos_ranking(db: Session, usuario: str, ciclo: str, cursos: list
 
 
 def registrar_snapshot_ranking(db: Session, usuario: str, ciclo: str, snapshot: list) -> int:
-    """Registra el ranking a partir de un snapshot de auto-check (course_id + nota_actual)."""
     cursos = [
         {"course_id": c.get("course_id"), "course_name": c.get("curso"), "nota": c.get("nota_actual")}
         for c in snapshot
@@ -248,10 +242,6 @@ def registrar_snapshot_ranking(db: Session, usuario: str, ciclo: str, snapshot: 
 
 
 def obtener_ranking(db: Session, usuario: str, course_id: str, ciclo: str) -> dict:
-    """
-    Posición relativa del usuario en el curso. Nunca devuelve notas ni identifica
-    a otros estudiantes: solo position, total y percentil (top %).
-    """
     base = {
         "course_id": course_id,
         "ciclo": ciclo,
@@ -287,7 +277,6 @@ def obtener_ranking(db: Session, usuario: str, course_id: str, ciclo: str) -> di
     except (TypeError, ValueError):
         return {**base, "disponible": False, "motivo": "sin_datos", "total": len(con_nota)}
 
-    # Los empates comparten posición (posición = cuántos están estrictamente arriba + 1).
     position = sum(1 for f in con_nota if _a_float(f.nota) is not None and _a_float(f.nota) > mi_nota) + 1
     total = len(con_nota)
     percentil = round(position * 100 / total)
@@ -310,15 +299,25 @@ def _a_float(valor):
 
 
 # ---------------------------------------------------------------------------
-# 1.4 Nombre del estudiante (fallback: None hasta confirmar selector del portal)
+# 1.4 Nombre del estudiante (extracción limpia HTML Banner SSB / WSO2)
 # ---------------------------------------------------------------------------
 def extraer_nombre_estudiante(session) -> str | None:
-    """
-    El nombre NO está disponible en el HTML estático de las páginas Banner SSB
-    (SPA que carga datos por JS). Pendiente: localizar el endpoint de user-info
-    en los bundles JS (bannerWeb-mf.js / studentApp-mf.js) o pedir el nombre al
-    usuario en el primer login. Mientras tanto devuelve None.
-    """
+    if session is None:
+        return None
+    try:
+        url = "https://ssb.upao.edu.pe/StudentSelfService/ssb/studentGrades"
+        res = session.get(url, timeout=5)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for sel in [".user-name", "#user-name", ".profile-name", ".student-name", "span.name"]:
+                elem = soup.select_one(sel)
+                if elem and elem.text.strip():
+                    return elem.text.strip()
+            match = re.search(r'["\']fullName["\']\s*:\s*["\']([^"\']+)["\']', res.text)
+            if match:
+                return match.group(1).strip()
+    except Exception as e:
+        print(f"[Features] Error en extracción de nombre: {e}")
     return None
 
 
@@ -337,11 +336,27 @@ def obtener_cuenta(db: Session, usuario: str) -> dict | None:
     }
 
 
+def listar_cuentas_registradas(db: Session) -> list:
+    filas = db.query(UserSetting).all()
+    return [
+        {
+            "usuario": u.usuario_campus,
+            "nombre": u.nombre,
+            "is_admin": bool(u.is_admin),
+            "ranking_optin": bool(u.ranking_optin),
+            "auto_check_enabled": bool(u.auto_check_enabled),
+            "tiene_password_guardada": bool(u.password_encriptada),
+            "fecha_primer_login": u.fecha_primer_login.isoformat() if u.fecha_primer_login else None,
+            "ultima_revision": u.ultima_revision.isoformat() if u.ultima_revision else None,
+        }
+        for u in filas
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Métricas 2.2/2.3/2.4: actividad diaria (DAU) y pico máximo simultáneo
 # ---------------------------------------------------------------------------
 def registrar_actividad(db: Session, usuario: str) -> None:
-    """Registra DAU (1 fila por usuario/día) y la traza request_log para picos."""
     if not usuario:
         return
     hoy = datetime.combine(date.today(), datetime.min.time())
@@ -359,15 +374,7 @@ def registrar_actividad(db: Session, usuario: str) -> None:
         db.rollback()
 
 
-def _prune_request_log(db: Session) -> None:
-    """Borra trazas de más de 45 días para no crecer sin límite."""
-    corte = datetime.now() - timedelta(days=45)
-    db.query(RequestLog).filter(RequestLog.timestamp < corte).delete()
-    db.commit()
-
-
 def serie_dau(db: Session, dias: int = 30) -> list:
-    """Serie [{"fecha": "YYYY-MM-DD", "usuarios": n}] para los últimos 'dias' días."""
     desde = date.today() - timedelta(days=dias - 1)
     filas = (
         db.query(DailyActivity)
@@ -439,7 +446,6 @@ def verificar_password_admin(user: UserSetting, password: str) -> bool:
 
 
 def asegurar_admin(db: Session) -> None:
-    """Crea/actualiza la cuenta admin del spec (000002006, hash bcrypt). Idempotente."""
     user = db.query(UserSetting).filter(UserSetting.usuario_campus == ADMIN_USUARIO).first()
     if user is None:
         user = UserSetting(

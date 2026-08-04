@@ -79,8 +79,6 @@ class NotasBuscarRequest(BaseModel):
     carrera: str = Field(default="UG")
 
 class NotasDetalleRequest(BaseModel):
-    # Nombres reales del JSON de Banner /courses. Se aceptan también los alias
-    # "periodo"/"crn" que envía la app Android actual (populate_by_name=True).
     model_config = ConfigDict(populate_by_name=True)
     termCode: str = Field(..., description="termCode del periodo, ej. 202610", alias="periodo")
     courseReferenceNumber: str = Field(..., description="courseReferenceNumber del curso (viene en el JSON de /courses)", alias="crn")
@@ -102,13 +100,16 @@ class RankingOptinRequest(BaseModel):
     usuario: str
     enabled: bool
 
-# ---------------------------------------------------------------------------
-# Manejo transparente de sesiones de Banner vencidas.
-# Los tokens locales tienen el formato "sess_{usuario}_{hash}"; si la sesión
-# cacheada de Banner expiró (o el backend reinició), se hace un re-login
-# automático con la contraseña encriptada del usuario. Si eso también falla,
-# se responde 401 {"detail": "sesion_expirada"} para que la app fuerce re-login.
-# ---------------------------------------------------------------------------
+class AdminLoginRequest(BaseModel):
+    usuario: str
+    password: str
+
+class AdminSemanaRequest(BaseModel):
+    fecha_inicio: str
+
+class AdminEstadoSugerenciaRequest(BaseModel):
+    estado: str
+
 
 def _usuario_de_token(token: str) -> str | None:
     if not token or not token.startswith("sess_"):
@@ -123,7 +124,6 @@ def _usuario_db_de_token(token: str, db: Session) -> UserSetting | None:
     return db.query(UserSetting).filter(UserSetting.usuario_campus == usuario_id).first()
 
 def _renovar_sesion(token: str, user: UserSetting | None) -> bool:
-    """Re-login transparente con la contraseña encriptada guardada del usuario."""
     if user is None:
         return False
     try:
@@ -139,11 +139,6 @@ def _renovar_sesion(token: str, user: UserSetting | None) -> bool:
     return result.get("success") and ACTIVE_SESSIONS.get(token) is not None
 
 def _sesion_garantizada(token: str, db: Session) -> requests.Session:
-    """
-    Devuelve una sesión de Banner válida para el token. Si la cacheada expiró o
-    el backend reinició, intenta re-login transparente. Si no es posible, lanza
-    HTTP 401 con detail='sesion_expirada'.
-    """
     session = ACTIVE_SESSIONS.get(token)
     valida = session is not None and scraper_service._sesion_sigue_valida(session)
     if not valida:
@@ -156,12 +151,6 @@ def _sesion_garantizada(token: str, db: Session) -> requests.Session:
     return session
 
 def _llamar_banner(token: str, db: Session, func, *args):
-    """
-    Ejecuta func(session, *args) con una sesión garantizada. Si la llamada falla
-    (la sesión pudo caducar a mitad de la petición), hace un re-login transparente
-    y reintenta UNA vez. Si el re-login falla -> 401 sesion_expirada; si el
-    reintento falla pese a sesión nueva -> error genérico 400 de Banner.
-    """
     session = _sesion_garantizada(token, db)
     result = func(session, *args)
     if result.get("success"):
@@ -183,6 +172,13 @@ def _llamar_banner(token: str, db: Session, func, *args):
 
     raise HTTPException(status_code=401, detail="sesion_expirada")
 
+def _verificar_admin(admin_user: str, db: Session) -> UserSetting:
+    user = db.query(UserSetting).filter(UserSetting.usuario_campus == admin_user, UserSetting.is_admin.is_(True)).first()
+    if not user:
+        raise HTTPException(status_code=403, detail="Acceso denegado: requiere privilegios de administrador")
+    return user
+
+
 @app.get("/")
 def read_root():
     return {
@@ -193,7 +189,6 @@ def read_root():
 
 @app.get("/healthz")
 def healthz():
-    """Endpoint liviano para cron externo (evita que Render duerma el servicio)."""
     return {"status": "ok", "service": "upaos-api", "time": datetime.utcnow().isoformat()}
 
 @app.post("/login")
@@ -260,15 +255,11 @@ def get_periodos(authorization: str | None = Header(None, alias="Authorization")
             raw_periodos = banner_res.get("periodos", [])
             periodos_str_list = [p.get("code") for p in raw_periodos if p.get("code")]
             return {
-                # Regla compartida: periodo regular (termina en 10/20, excluye 90)
-                # con el código numérico más alto (el más reciente).
                 "periodo_actual": banner_sso_service.periodo_actual(raw_periodos),
                 "periodos": periodos_str_list,
                 "detalles_periodos": raw_periodos
             }
 
-    # Sin sesión activa de Banner no se inventan periodos: lista vacía para que el
-    # cliente use su propio valor por defecto. La lista siempre viene del GET /term real.
     return {
         "periodo_actual": None,
         "periodos": [],
@@ -301,19 +292,16 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
     token = authorization.replace("Bearer ", "").strip()
     print(f"[POST /notas/buscar] Token: {token[:15]}..., Periodo: {req.periodo}, Nivel: {req.carrera}")
 
-    # Sesión garantizada con re-login transparente (401 sesion_expirada si falla).
     result = _llamar_banner(
         token,
         db,
         func=lambda s: banner_sso_service.get_courses_con_notas(s, req.periodo, req.carrera),
     )
 
-    # Momento en que Banner respondió (la app lo muestra como "Actualizado hace X").
     ultima_actualizacion = datetime.now().isoformat()
     raw_cursos = result.get("cursos", [])
     normalized_cursos = []
 
-    # Extraer la lista real de cursos contenida en 'data' si viniera anidada
     if isinstance(raw_cursos, dict):
         raw_cursos = raw_cursos.get("data", [])
 
@@ -321,8 +309,6 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
         for item in raw_cursos:
             if isinstance(item, dict):
                 course_title = item.get("courseTitle") or item.get("subjectDescription") or item.get("courseNumber") or item.get("nombre") or "Curso"
-                # nota_actual viene enriquecida desde los componentes reales
-                # (get_courses_con_notas): promedio ponderado progresivo o None.
                 nota_actual = item.get("nota_actual")
                 crn = item.get("courseReferenceNumber") or item.get("crn") or item.get("id")
 
@@ -372,7 +358,6 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
 @app.post("/notas/detalle")
 def buscar_detalle_curso(req: NotasDetalleRequest, authorization: str = Header(..., alias="Authorization"), db: Session = Depends(get_db)):
     token = authorization.replace("Bearer ", "").strip()
-
     print(f"[POST /notas/detalle] termCode={req.termCode}, courseReferenceNumber={req.courseReferenceNumber}")
     result = _llamar_banner(
         token,
@@ -399,11 +384,6 @@ def get_horario(
     term: str = "202610",
     db: Session = Depends(get_db),
 ):
-    """
-    Horario semanal de clases desde inscripcion.upao.edu.pe (getRegistrationEvents),
-    reutilizando la misma sesión SSO de Banner. Devuelve eventos agrupados por curso
-    (crn) y por día de la semana, con bloques consecutivos fusionados.
-    """
     token = authorization.replace("Bearer ", "").strip()
     print(f"[GET /horario] Token: {token[:15]}... term: {term}")
 
@@ -493,7 +473,6 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
 
 @app.get("/notificaciones")
 def get_notificaciones(usuario: str, db: Session = Depends(get_db)):
-    """Lista de notificaciones (recientes primero) + conteo de no leídas."""
     filas = (
         db.query(Notificacion)
         .filter(Notificacion.usuario_banner == usuario)
@@ -523,7 +502,6 @@ def get_notificaciones(usuario: str, db: Session = Depends(get_db)):
 
 @app.patch("/notificaciones/marcar-leidas")
 def marcar_notificaciones_leidas(usuario: str, db: Session = Depends(get_db)):
-    """Marca todas las notificaciones del usuario como leídas."""
     result = (
         db.query(Notificacion)
         .filter(Notificacion.usuario_banner == usuario, Notificacion.leida.is_(False))
@@ -534,7 +512,6 @@ def marcar_notificaciones_leidas(usuario: str, db: Session = Depends(get_db)):
 
 @app.patch("/notificaciones/{notificacion_id}/marcar-leida")
 def marcar_notificacion_leida(notificacion_id: int, usuario: str, db: Session = Depends(get_db)):
-    """Marca una notificación específica como leída."""
     notif = (
         db.query(Notificacion)
         .filter(Notificacion.id == notificacion_id, Notificacion.usuario_banner == usuario)
@@ -546,13 +523,8 @@ def marcar_notificacion_leida(notificacion_id: int, usuario: str, db: Session = 
     db.commit()
     return {"message": "Notificación marcada como leída", "id": notif.id}
 
-# ---------------------------------------------------------------------------
-# Features 1.1 - 1.4 del spec (funcionalidad de usuario)
-# ---------------------------------------------------------------------------
-
 @app.post("/sugerencias")
 def crear_sugerencia(req: SugerenciaRequest, db: Session = Depends(get_db)):
-    """Buzón de sugerencias con límite diario anti-spam (3 por día por usuario)."""
     try:
         result = features_service.registrar_sugerencia(db, req.usuario, req.texto)
     except ValueError as e:
@@ -562,13 +534,11 @@ def crear_sugerencia(req: SugerenciaRequest, db: Session = Depends(get_db)):
 
 @app.get("/sugerencias/mis")
 def mis_sugerencias(usuario: str, db: Session = Depends(get_db)):
-    """Historial de sugerencias del usuario con su estado (pendiente/en_revision/...)."""
     features_service.registrar_actividad(db, usuario)
     return {"sugerencias": features_service.listar_mis_sugerencias(db, usuario)}
 
 @app.post("/ranking/optin")
 def ranking_optin(req: RankingOptinRequest, db: Session = Depends(get_db)):
-    """Activa/desactiva la participación global en el ranking anónimo (1.2)."""
     try:
         return features_service.set_ranking_optin(db, req.usuario, req.enabled)
     except ValueError as e:
@@ -576,25 +546,70 @@ def ranking_optin(req: RankingOptinRequest, db: Session = Depends(get_db)):
 
 @app.get("/ranking")
 def ranking_curso(usuario: str, course_id: str, ciclo: str, db: Session = Depends(get_db)):
-    """
-    Posición relativa del usuario en un curso (anónimo). Nunca devuelve notas ni
-    identifica a otros estudiantes. Solo visible con opt-in y >= 5 participantes.
-    """
     return features_service.obtener_ranking(db, usuario, course_id, ciclo)
 
 @app.get("/semana")
 def semana(db: Session = Depends(get_db)):
-    """Semana académica global: Semana X de 16, Semana 17 · Sustitutorios, etc."""
     return features_service.semana_academica(db)
 
 @app.get("/cuenta")
 def cuenta(usuario: str, db: Session = Depends(get_db)):
-    """Perfil del usuario: nombre, is_admin, ranking_optin y flags de cuenta."""
     features_service.registrar_actividad(db, usuario)
     perfil = features_service.obtener_cuenta(db, usuario)
     if perfil is None:
         raise HTTPException(status_code=404, detail="Usuario no registrado en ajustes")
     return perfil
+
+# ---------------------------------------------------------------------------
+# Panel Admin 2.1 - 2.4 (rutas protegidas para administración)
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/login")
+def admin_login(req: AdminLoginRequest, db: Session = Depends(get_db)):
+    user = db.query(UserSetting).filter(
+        UserSetting.usuario_campus == req.usuario,
+        UserSetting.is_admin.is_(True)
+    ).first()
+    if not user or not features_service.verificar_password_admin(user, req.password):
+        raise HTTPException(status_code=401, detail="Credenciales de administrador inválidas")
+    return {
+        "success": True,
+        "admin_usuario": user.usuario_campus,
+        "token": f"admin_sess_{user.usuario_campus}"
+    }
+
+@app.get("/admin/cuentas")
+def admin_cuentas(admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+    _verificar_admin(admin_usuario, db)
+    return {"cuentas": features_service.listar_cuentas_registradas(db)}
+
+@app.get("/admin/sugerencias")
+def admin_sugerencias(admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+    _verificar_admin(admin_usuario, db)
+    return {"sugerencias": features_service.listar_todas_sugerencias(db)}
+
+@app.patch("/admin/sugerencias/{sugerencia_id}/estado")
+def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRequest, admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+    _verificar_admin(admin_usuario, db)
+    try:
+        return features_service.actualizar_estado_sugerencia(db, sugerencia_id, req.estado)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/admin/semana")
+def admin_establecer_semana(req: AdminSemanaRequest, admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+    _verificar_admin(admin_usuario, db)
+    return features_service.establecer_semana_inicio(db, req.fecha_inicio)
+
+@app.get("/admin/metricas")
+def admin_metricas(admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+    _verificar_admin(admin_usuario, db)
+    return {
+        "dau_30_dias": features_service.serie_dau(db, 30),
+        "cuentas_activas_hoy": features_service.cuentas_activas_hoy(db),
+        "pico_hoy": features_service.pico_hoy(db),
+        "pico_historico": features_service.pico_historico(db),
+    }
 
 if __name__ == "__main__":
     import uvicorn
