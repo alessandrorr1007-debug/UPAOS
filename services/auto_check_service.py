@@ -6,6 +6,7 @@ from database import SessionLocal, UserSetting, decrypt_password, guardar_notifi
 from services.banner_sso_service import banner_sso_service
 from services.notification_service import notification_service
 from services.scraper_service import scraper_service
+from services import features_service
 
 
 def _fmt_nota(v):
@@ -60,7 +61,19 @@ def _construir_snapshot(session, term: str) -> list:
                 "nota": _fmt_nota(c.get("puntaje_obtenido")),
                 "sub": sub,
             }
-        snapshot.append({"crn": str(crn), "curso": str(nombre), "componentes": componentes})
+        nota_actual = banner_sso_service._calcular_nota_actual(
+            banner_sso_service._extraer_componentes_con_peso(detail)
+        )
+        course_id = features_service.normalizar_course_id(
+            item.get("subjectCode"), item.get("courseNumber")
+        )
+        snapshot.append({
+            "crn": str(crn),
+            "curso": str(nombre),
+            "course_id": course_id,
+            "nota_actual": nota_actual,
+            "componentes": componentes,
+        })
 
     print(f"[AutoCheck] Snapshot construido para {term}: {len(snapshot)} cursos.")
     return snapshot
@@ -123,30 +136,30 @@ def notificar_cambios(db, user, cambios: list):
         )
 
 
-def revisar_usuario(user) -> tuple[list, list | None]:
+def revisar_usuario(user) -> tuple[list, list | None, str | None]:
     """
     Revisa las notas de un usuario:
       - Reutiliza la sesión de Banner cacheada (login completo solo si expiró).
       - Detecta el periodo actual (regla 10/20 excluyendo 90).
       - Construye el snapshot nuevo y lo compara con el guardado.
-    Devuelve (cambios, nuevo_snapshot). nuevo_snapshot es None si no se pudo revisar.
+    Devuelve (cambios, nuevo_snapshot, term). nuevo_snapshot es None si no se pudo revisar.
     """
     try:
         pass_decrypted = decrypt_password(user.password_encriptada)
     except Exception as e:
         print(f"[AutoCheck] No se pudo descifrar la contraseña de {user.usuario_campus}: {e}")
-        return [], None
+        return [], None, None
 
     session, _ = scraper_service.obtener_sesion_valida(user.usuario_campus, pass_decrypted)
     if session is None:
         print(f"[AutoCheck] Sin sesión válida para {user.usuario_campus}.")
-        return [], None
+        return [], None, None
 
     periodos = banner_sso_service.get_periodos(session)
     term = banner_sso_service.periodo_actual(periodos.get("periodos", []))
     if not term:
         print(f"[AutoCheck] No se detectó periodo regular para {user.usuario_campus}.")
-        return [], None
+        return [], None, None
 
     snapshot = _construir_snapshot(session, term)
 
@@ -158,7 +171,7 @@ def revisar_usuario(user) -> tuple[list, list | None]:
             prev = None
 
     cambios = _comparar_snapshots(prev, snapshot)
-    return cambios, snapshot
+    return cambios, snapshot, term
 
 
 def run_auto_check():
@@ -180,13 +193,16 @@ def run_auto_check():
                     continue
 
             try:
-                cambios, snapshot = revisar_usuario(user)
+                cambios, snapshot, term = revisar_usuario(user)
                 if snapshot is None:
                     continue
 
                 user.ultimo_snapshot_notas = json.dumps(snapshot)
                 user.ultima_revision = datetime.now()
                 db.commit()
+
+                if user.ranking_optin:
+                    features_service.registrar_snapshot_ranking(db, user.usuario_campus, term, snapshot)
 
                 if cambios:
                     print(f"[AutoCheck] Cambios para {user.usuario_campus}: {[c['mensaje'] for c in cambios]}")

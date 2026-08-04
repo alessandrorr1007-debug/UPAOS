@@ -11,11 +11,12 @@ from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from config import settings
-from database import get_db, UserSetting, Notificacion, encrypt_password, decrypt_password
+from database import get_db, SessionLocal, UserSetting, Notificacion, encrypt_password, decrypt_password
 from services.scraper_service import scraper_service, ACTIVE_SESSIONS
 from services.banner_sso_service import banner_sso_service
 from services.notification_service import notification_service
 from services import auto_check_service
+from services import features_service
 
 
 def _tick_auto_check():
@@ -39,6 +40,10 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     print("[Scheduler] Job auto_check iniciado (cada 5 min, respeta el intervalo por usuario).")
+    try:
+        features_service.asegurar_admin(SessionLocal())
+    except Exception as e:
+        print(f"[Startup] Warning al asegurar cuenta admin: {e}")
     yield
     scheduler.shutdown(wait=False)
 
@@ -88,6 +93,14 @@ class IntervaloSetting(BaseModel):
 
 class DeviceTokenRequest(BaseModel):
     fcm_token: str
+
+class SugerenciaRequest(BaseModel):
+    usuario: str
+    texto: str
+
+class RankingOptinRequest(BaseModel):
+    usuario: str
+    enabled: bool
 
 # ---------------------------------------------------------------------------
 # Manejo transparente de sesiones de Banner vencidas.
@@ -190,15 +203,22 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
     if result.get("success"):
         existing_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
         if not existing_user:
-            user_entry = UserSetting(
+            existing_user = UserSetting(
                 usuario_campus=req.usuario,
                 password_encriptada=encrypt_password(req.password),
                 auto_check_enabled=False
             )
-            db.add(user_entry)
+            db.add(existing_user)
         else:
             existing_user.password_encriptada = encrypt_password(req.password)
+        if existing_user.fecha_primer_login is None:
+            existing_user.fecha_primer_login = datetime.now()
+        if not existing_user.nombre:
+            existing_user.nombre = features_service.extraer_nombre_estudiante(
+                ACTIVE_SESSIONS.get(result.get("token"))
+            )
         db.commit()
+        features_service.registrar_actividad(db, req.usuario)
     print(f"[Login Response]: {result}")
     return result
 
@@ -208,15 +228,22 @@ def login_confirmar_captcha(req: ManualCaptchaRequest, db: Session = Depends(get
     if result.get("success"):
         existing_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
         if not existing_user:
-            user_entry = UserSetting(
+            existing_user = UserSetting(
                 usuario_campus=req.usuario,
                 password_encriptada=encrypt_password(req.password),
                 auto_check_enabled=False
             )
-            db.add(user_entry)
+            db.add(existing_user)
         else:
             existing_user.password_encriptada = encrypt_password(req.password)
+        if existing_user.fecha_primer_login is None:
+            existing_user.fecha_primer_login = datetime.now()
+        if not existing_user.nombre:
+            existing_user.nombre = features_service.extraer_nombre_estudiante(
+                ACTIVE_SESSIONS.get(result.get("token"))
+            )
         db.commit()
+        features_service.registrar_actividad(db, req.usuario)
     return result
 
 @app.get("/notas/periodos")
@@ -310,6 +337,26 @@ def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias
 
     promedio_general, promedio_basado_en = banner_sso_service._calcular_promedio_general(normalized_cursos)
 
+    usuario_token = _usuario_de_token(token)
+    if usuario_token:
+        features_service.registrar_actividad(db, usuario_token)
+        ranking_cursos = []
+        if isinstance(raw_cursos, list):
+            for item in raw_cursos:
+                if not isinstance(item, dict):
+                    continue
+                course_id = features_service.normalizar_course_id(
+                    item.get("subjectCode"), item.get("courseNumber")
+                )
+                nota = item.get("nota_actual")
+                if course_id and nota is not None:
+                    ranking_cursos.append({
+                        "course_id": course_id,
+                        "course_name": item.get("courseTitle") or item.get("subjectDescription"),
+                        "nota": nota,
+                    })
+        features_service.registrar_cursos_ranking(db, usuario_token, req.periodo, ranking_cursos)
+
     response_data = {
         "periodo": req.periodo,
         "carrera": req.carrera,
@@ -341,6 +388,9 @@ def get_asistencia(authorization: str = Header(..., alias="Authorization"), db: 
 
     result = _llamar_banner(token, db, func=lambda s: banner_sso_service.get_attendance(s))
     print(f"[SUCCESS /asistencia] Total registros: {result.get('totalCount')}")
+    usuario_token = _usuario_de_token(token)
+    if usuario_token:
+        features_service.registrar_actividad(db, usuario_token)
     return result
 
 @app.get("/horario")
@@ -359,6 +409,9 @@ def get_horario(
 
     result = _llamar_banner(token, db, func=lambda s: banner_sso_service.get_horario(s, term))
     print(f"[SUCCESS /horario] Total cursos: {result.get('total_cursos')}")
+    usuario_token = _usuario_de_token(token)
+    if usuario_token:
+        features_service.registrar_actividad(db, usuario_token)
     return result
 
 @app.patch("/settings/auto-check")
@@ -416,7 +469,7 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    cambios, snapshot = auto_check_service.revisar_usuario(user)
+    cambios, snapshot, term = auto_check_service.revisar_usuario(user)
     if snapshot is None:
         return {"success": False, "message": "No se pudo obtener una sesión válida de Banner ni el periodo actual."}
 
@@ -424,12 +477,16 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
     user.ultima_revision = datetime.now()
     db.commit()
 
+    features_service.registrar_actividad(db, user.usuario_campus)
+    if user.ranking_optin:
+        features_service.registrar_snapshot_ranking(db, user.usuario_campus, term, snapshot)
+
     if cambios:
         auto_check_service.notificar_cambios(db, user, cambios)
 
     return {
         "success": True,
-        "periodo": "automático",
+        "periodo": term,
         "cambios": [c["mensaje"] for c in cambios],
         "total_cambios": len(cambios),
     }
@@ -488,6 +545,56 @@ def marcar_notificacion_leida(notificacion_id: int, usuario: str, db: Session = 
     notif.leida = True
     db.commit()
     return {"message": "Notificación marcada como leída", "id": notif.id}
+
+# ---------------------------------------------------------------------------
+# Features 1.1 - 1.4 del spec (funcionalidad de usuario)
+# ---------------------------------------------------------------------------
+
+@app.post("/sugerencias")
+def crear_sugerencia(req: SugerenciaRequest, db: Session = Depends(get_db)):
+    """Buzón de sugerencias con límite diario anti-spam (3 por día por usuario)."""
+    try:
+        result = features_service.registrar_sugerencia(db, req.usuario, req.texto)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    features_service.registrar_actividad(db, req.usuario)
+    return {"success": True, **result}
+
+@app.get("/sugerencias/mis")
+def mis_sugerencias(usuario: str, db: Session = Depends(get_db)):
+    """Historial de sugerencias del usuario con su estado (pendiente/en_revision/...)."""
+    features_service.registrar_actividad(db, usuario)
+    return {"sugerencias": features_service.listar_mis_sugerencias(db, usuario)}
+
+@app.post("/ranking/optin")
+def ranking_optin(req: RankingOptinRequest, db: Session = Depends(get_db)):
+    """Activa/desactiva la participación global en el ranking anónimo (1.2)."""
+    try:
+        return features_service.set_ranking_optin(db, req.usuario, req.enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/ranking")
+def ranking_curso(usuario: str, course_id: str, ciclo: str, db: Session = Depends(get_db)):
+    """
+    Posición relativa del usuario en un curso (anónimo). Nunca devuelve notas ni
+    identifica a otros estudiantes. Solo visible con opt-in y >= 5 participantes.
+    """
+    return features_service.obtener_ranking(db, usuario, course_id, ciclo)
+
+@app.get("/semana")
+def semana(db: Session = Depends(get_db)):
+    """Semana académica global: Semana X de 16, Semana 17 · Sustitutorios, etc."""
+    return features_service.semana_academica(db)
+
+@app.get("/cuenta")
+def cuenta(usuario: str, db: Session = Depends(get_db)):
+    """Perfil del usuario: nombre, is_admin, ranking_optin y flags de cuenta."""
+    features_service.registrar_actividad(db, usuario)
+    perfil = features_service.obtener_cuenta(db, usuario)
+    if perfil is None:
+        raise HTTPException(status_code=404, detail="Usuario no registrado en ajustes")
+    return perfil
 
 if __name__ == "__main__":
     import uvicorn

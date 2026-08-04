@@ -25,6 +25,12 @@ class UserSetting(Base):
     ultimo_snapshot_notas = Column(Text, nullable=True)
     ultima_revision = Column(DateTime, nullable=True)
     fcm_token = Column(String, nullable=True)
+    # Features 1.2/1.4/2.1 del spec: perfil y panel admin
+    nombre = Column(String, nullable=True)
+    ranking_optin = Column(Boolean, default=False)
+    fecha_primer_login = Column(DateTime, nullable=True)
+    is_admin = Column(Boolean, default=False)
+    admin_password_hash = Column(String, nullable=True)
 
 
 class Notificacion(Base):
@@ -38,6 +44,52 @@ class Notificacion(Base):
     fecha_creacion = Column(DateTime, default=datetime.now, index=True)
     leida = Column(Boolean, default=False)
 
+
+class Sugerencia(Base):
+    __tablename__ = "sugerencias"
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_banner = Column(String, index=True, nullable=False)
+    texto = Column(Text, nullable=False)
+    estado = Column(String, default="pendiente")
+    fecha_creacion = Column(DateTime, default=datetime.now, index=True)
+
+
+class CourseGradeAnon(Base):
+    __tablename__ = "course_grades_anon"
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_banner = Column(String, index=True, nullable=False)
+    course_id = Column(String, index=True, nullable=False)
+    course_name = Column(String, nullable=True)
+    nota = Column(String, nullable=True)
+    ciclo = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+
+
+class DailyActivity(Base):
+    __tablename__ = "daily_activity"
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_banner = Column(String, index=True, nullable=False)
+    fecha = Column(DateTime, nullable=False, index=True)
+
+
+class RequestLog(Base):
+    __tablename__ = "request_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_banner = Column(String, index=True, nullable=False)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+
+
+class GlobalSetting(Base):
+    __tablename__ = "global_settings"
+
+    id = Column(Integer, primary_key=True)
+    clave = Column(String, unique=True, nullable=False)
+    valor = Column(Text, nullable=True)
+
 Base.metadata.create_all(bind=engine)
 
 def _migrate_missing_columns():
@@ -48,6 +100,11 @@ def _migrate_missing_columns():
         nuevas_columnas = {
             "intervalo_chequeo_minutos": "ALTER TABLE user_settings ADD COLUMN intervalo_chequeo_minutos INTEGER DEFAULT 10",
             "ultima_revision": "ALTER TABLE user_settings ADD COLUMN ultima_revision DATETIME",
+            "nombre": "ALTER TABLE user_settings ADD COLUMN nombre VARCHAR",
+            "ranking_optin": "ALTER TABLE user_settings ADD COLUMN ranking_optin BOOLEAN DEFAULT 0",
+            "fecha_primer_login": "ALTER TABLE user_settings ADD COLUMN fecha_primer_login DATETIME",
+            "is_admin": "ALTER TABLE user_settings ADD COLUMN is_admin BOOLEAN DEFAULT 0",
+            "admin_password_hash": "ALTER TABLE user_settings ADD COLUMN admin_password_hash VARCHAR",
         }
         with engine.begin() as conn:
             for name, ddl in nuevas_columnas.items():
