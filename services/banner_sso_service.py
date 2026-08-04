@@ -711,20 +711,21 @@ class BannerSSOService:
         return f"{hhmm[:2]}:{hhmm[2:]}"
 
     @staticmethod
-    def _aula_de_meeting(mt: dict) -> str | None:
-        """'buildingDescription' + 'room' -> 'AULAS A 201'. None si no hay aula."""
-        room = mt.get("room")
-        building = mt.get("buildingDescription")
-        partes = [str(p).strip() for p in (building, room) if p]
-        return " ".join(partes) if partes else None
-
-    @staticmethod
     def _desescapar_html(valor):
         """'Aplicaciones M&oacute;viles...' -> 'Aplicaciones Móviles...'."""
         if not isinstance(valor, str):
             return valor
         from html import unescape
         return unescape(valor)
+
+    @staticmethod
+    def _aula_de_meeting(mt: dict) -> str | None:
+        """'buildingDescription' + 'room' -> 'PABELLÓN G G701'. None si no hay aula."""
+        from html import unescape
+        room = mt.get("room")
+        building = mt.get("buildingDescription")
+        partes = [unescape(str(p)).strip() for p in (building, room) if p]
+        return unescape(" ".join(partes)) if partes else None
 
     def _agrupar_horario_desde_registros(self, registros: list, term: str) -> list:
         """
