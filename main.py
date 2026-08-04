@@ -579,17 +579,17 @@ def admin_login(req: AdminLoginRequest, db: Session = Depends(get_db)):
     }
 
 @app.get("/admin/cuentas")
-def admin_cuentas(admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+def admin_cuentas(admin_usuario: str = "000279330", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     return {"cuentas": features_service.listar_cuentas_registradas(db)}
 
 @app.get("/admin/sugerencias")
-def admin_sugerencias(admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+def admin_sugerencias(admin_usuario: str = "000279330", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     return {"sugerencias": features_service.listar_todas_sugerencias(db)}
 
 @app.patch("/admin/sugerencias/{sugerencia_id}/estado")
-def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRequest, admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRequest, admin_usuario: str = "000279330", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     try:
         return features_service.actualizar_estado_sugerencia(db, sugerencia_id, req.estado)
@@ -597,12 +597,12 @@ def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRe
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/admin/semana")
-def admin_establecer_semana(req: AdminSemanaRequest, admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+def admin_establecer_semana(req: AdminSemanaRequest, admin_usuario: str = "000279330", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     return features_service.establecer_semana_inicio(db, req.fecha_inicio)
 
 @app.get("/admin/metricas")
-def admin_metricas(admin_usuario: str = "000002006", db: Session = Depends(get_db)):
+def admin_metricas(admin_usuario: str = "000279330", db: Session = Depends(get_db)):
     _verificar_admin(admin_usuario, db)
     return {
         "dau_30_dias": features_service.serie_dau(db, 30),
