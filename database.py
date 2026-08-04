@@ -63,7 +63,21 @@ class CourseGradeAnon(Base):
     course_id = Column(String, index=True, nullable=False)
     course_name = Column(String, nullable=True)
     nota = Column(String, nullable=True)
+    creditos = Column(Integer, nullable=True)
     ciclo = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+
+
+class PeriodoPromedioHistorial(Base):
+    __tablename__ = "periodo_promedio_historial"
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_banner = Column(String, index=True, nullable=False)
+    periodo = Column(String, index=True, nullable=False)
+    pps_oficial = Column(Text, nullable=True)
+    pps_calculado = Column(Text, nullable=True)
+    fuente = Column(String, nullable=False, default="calculado")
+    total_creditos = Column(Integer, nullable=True)
     timestamp = Column(DateTime, default=datetime.now, index=True)
 
 
@@ -96,8 +110,8 @@ def _migrate_missing_columns():
     """Agrega columnas nuevas a tablas SQLite ya existentes (ALTER TABLE)."""
     try:
         inspector = inspect(engine)
-        columns = {col["name"] for col in inspector.get_columns("user_settings")}
-        nuevas_columnas = {
+        columns_user = {col["name"] for col in inspector.get_columns("user_settings")}
+        nuevas_columnas_user = {
             "intervalo_chequeo_minutos": "ALTER TABLE user_settings ADD COLUMN intervalo_chequeo_minutos INTEGER DEFAULT 10",
             "ultima_revision": "ALTER TABLE user_settings ADD COLUMN ultima_revision DATETIME",
             "nombre": "ALTER TABLE user_settings ADD COLUMN nombre VARCHAR",
@@ -106,11 +120,19 @@ def _migrate_missing_columns():
             "is_admin": "ALTER TABLE user_settings ADD COLUMN is_admin BOOLEAN DEFAULT 0",
             "admin_password_hash": "ALTER TABLE user_settings ADD COLUMN admin_password_hash VARCHAR",
         }
+        columns_anon = {col["name"] for col in inspector.get_columns("course_grades_anon")}
+        nuevas_columnas_anon = {
+            "creditos": "ALTER TABLE course_grades_anon ADD COLUMN creditos INTEGER",
+        }
         with engine.begin() as conn:
-            for name, ddl in nuevas_columnas.items():
-                if name not in columns:
+            for name, ddl in nuevas_columnas_user.items():
+                if name not in columns_user:
                     conn.exec_driver_sql(ddl)
-                    print(f"[DB] Columna añadida: {name}")
+                    print(f"[DB] Columna añadida a user_settings: {name}")
+            for name, ddl in nuevas_columnas_anon.items():
+                if name not in columns_anon:
+                    conn.exec_driver_sql(ddl)
+                    print(f"[DB] Columna añadida a course_grades_anon: {name}")
     except Exception as e:
         print(f"[DB Warning] No se pudieron migrar columnas: {e}")
 

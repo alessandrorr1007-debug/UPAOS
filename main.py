@@ -398,6 +398,33 @@ def buscar_detalle_curso(req: NotasDetalleRequest, authorization: str = Header(.
     )
     return result
 
+@app.get("/api/promedio/{periodo}")
+@app.get("/notas/promedio/{periodo}")
+def get_promedio_periodo(
+    periodo: str,
+    authorization: str = Header(..., alias="Authorization"),
+    db: Session = Depends(get_db)
+):
+    """
+    Calcula o extrae el Promedio Ponderado Semestral (PPS) del periodo cruzando
+    notas con los créditos de Horario/Cursos.
+    Prioriza pps_oficial si el portal/Cuadro de Mérito está disponible.
+    """
+    token = authorization.replace("Bearer ", "").strip()
+    print(f"[GET /api/promedio/{periodo}] Token: {token[:15]}...")
+
+    result = _llamar_banner(
+        token,
+        db,
+        func=lambda s: banner_sso_service.obtener_promedio_periodo(s, periodo)
+    )
+
+    usuario_token = _usuario_de_token(token)
+    if usuario_token:
+        features_service.registrar_actividad(db, usuario_token)
+
+    return result
+
 @app.get("/asistencia")
 def get_asistencia(authorization: str = Header(..., alias="Authorization"), db: Session = Depends(get_db)):
     token = authorization.replace("Bearer ", "").strip()

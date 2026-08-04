@@ -1052,4 +1052,171 @@ class BannerSSOService:
                 "detalles": []
             }
 
+    def scrape_horario_creditos(self, session: requests.Session, periodo: str) -> list:
+        """
+        Scrapea la página/endpoint de Horario/Cursos para extraer por cada curso:
+        - CRN (courseReferenceNumber)
+        - Nombre del curso (courseTitle)
+        - Créditos (creditHours)
+        Devuelve lista de dicts: [{'crn': str, 'nombre': str, 'creditos': int|float}, ...]
+        """
+        creditos_lista = []
+        try:
+            courses_res = self.get_courses(session, periodo)
+            if courses_res.get("success"):
+                cursos_raw = courses_res.get("cursos", [])
+                if isinstance(cursos_raw, dict):
+                    cursos_raw = cursos_raw.get("data", [])
+                if isinstance(cursos_raw, list):
+                    for item in cursos_raw:
+                        if not isinstance(item, dict):
+                            continue
+                        crn = str(item.get("courseReferenceNumber") or item.get("crn") or item.get("id") or "").strip()
+                        nombre = str(item.get("courseTitle") or item.get("subjectDescription") or item.get("nombre") or "").strip()
+                        creditos_val = (
+                            item.get("creditHours")
+                            or item.get("creditHourLow")
+                            or item.get("credits")
+                            or item.get("creditHourHigh")
+                        )
+                        creditos_num = None
+                        if creditos_val is not None:
+                            try:
+                                creditos_num = int(float(str(creditos_val).strip()))
+                            except (ValueError, TypeError):
+                                creditos_num = None
+                        
+                        if crn or nombre:
+                            creditos_lista.append({
+                                "crn": crn,
+                                "nombre": nombre,
+                                "creditos": creditos_num
+                            })
+        except Exception as e:
+            print(f"[Banner Warning] Excepción scraping créditos en Horario: {e}")
+
+        print(f"[Banner Log] Créditos extraídos para periodo {periodo}: {len(creditos_lista)} cursos.")
+        return creditos_lista
+
+    @staticmethod
+    def combinar_notas_creditos(notas: list, horario_creditos: list) -> list:
+        """
+        Combina la lista de cursos con notas y la lista de horario por CRN (o nombre como fallback).
+        Si un CRN no aparece o no tiene créditos, loguea un warning y asigna creditos = None sin fallar.
+        """
+        mapa_crn = {}
+        mapa_nombre = {}
+        for h in horario_creditos or []:
+            if not isinstance(h, dict):
+                continue
+            crn = str(h.get("crn") or "").strip()
+            nombre = str(h.get("nombre") or "").strip().lower()
+            cred = h.get("creditos")
+            if crn:
+                mapa_crn[crn] = cred
+            if nombre:
+                mapa_nombre[nombre] = cred
+
+        resultado = []
+        for n in notas or []:
+            if not isinstance(n, dict):
+                continue
+            curso_copy = dict(n)
+            crn = str(n.get("crn") or n.get("courseReferenceNumber") or "").strip()
+            nombre = str(n.get("nombre") or n.get("courseTitle") or "").strip().lower()
+
+            creditos = mapa_crn.get(crn)
+            if creditos is None and nombre:
+                creditos = mapa_nombre.get(nombre)
+
+            if creditos is None:
+                print(f"[PPS Warning] No se encontraron créditos para curso CRN '{crn}' / '{n.get('nombre')}'. Asignado None.")
+
+            curso_copy["creditos"] = creditos
+            resultado.append(curso_copy)
+
+        return resultado
+
+    @staticmethod
+    def calcular_pps(cursos: list) -> float | None:
+        """
+        Cálculo del Promedio Ponderado Semestral (PPS):
+        PPS = Σ(nota * creditos) / Σ(creditos)
+        Si algún curso no tiene créditos o nota válida (None), se excluye y advierte.
+        Conserva precisión decimal.
+        """
+        cursos_validos = []
+        for c in cursos or []:
+            if not isinstance(c, dict):
+                continue
+            nota_val = c.get("nota") if c.get("nota") is not None else c.get("nota_actual")
+            cred_val = c.get("creditos")
+            if nota_val is not None and cred_val is not None:
+                try:
+                    n_float = float(nota_val)
+                    c_float = float(cred_val)
+                    if c_float > 0:
+                        cursos_validos.append((n_float, c_float))
+                except (ValueError, TypeError):
+                    continue
+            else:
+                print(f"[PPS Warning] Curso excluido de PPS por faltar nota/créditos: {c.get('nombre')}")
+
+        if not cursos_validos:
+            return None
+
+        suma_ponderada = sum(nota * cred for nota, cred in cursos_validos)
+        total_creditos = sum(cred for _, cred in cursos_validos)
+        if total_creditos <= 0:
+            return None
+
+        return round(suma_ponderada / total_creditos, 4)
+
+    def obtener_promedio_periodo(self, session: requests.Session, periodo: str, cursos: list = None) -> dict:
+        """
+        Obtiene el resumen de promedio del periodo (PPS oficial vs calculado).
+        1. Intenta obtener el pps_oficial directamente del portal (Cuadro de Mérito si existe).
+        2. Scrapea los créditos del periodo y combina con las notas para pps_calculado.
+        """
+        pps_oficial = None
+        fuente = "calculado"
+
+        try:
+            url_merito = f"{self.ssb_base_url}/studentMerit?term={periodo}"
+            res_m = session.get(url_merito, timeout=5)
+            if res_m.status_code == 200:
+                data = res_m.json() if "json" in res_m.headers.get("Content-Type", "") else {}
+                if isinstance(data, dict) and data.get("pps"):
+                    pps_oficial = float(data["pps"])
+                    fuente = "cuadro_merito"
+        except Exception:
+            pass
+
+        if cursos is None:
+            courses_res = self.get_courses_con_notas(session, periodo)
+            cursos = courses_res.get("cursos", [])
+
+        horario_creditos = self.scrape_horario_creditos(session, periodo)
+        cursos_combinados = self.combinar_notas_creditos(cursos, horario_creditos)
+        pps_calculado = self.calcular_pps(cursos_combinados)
+
+        total_creditos = sum(c.get("creditos") for c in cursos_combinados if c.get("creditos") is not None)
+
+        return {
+            "periodo": periodo,
+            "pps_oficial": pps_oficial,
+            "pps_calculado": pps_calculado,
+            "fuente": fuente if pps_oficial else "calculado",
+            "total_creditos": total_creditos if total_creditos > 0 else None,
+            "cursos": [
+                {
+                    "crn": c.get("crn", ""),
+                    "nombre": c.get("nombre", ""),
+                    "nota": c.get("nota_actual") if c.get("nota_actual") is not None else c.get("nota"),
+                    "creditos": c.get("creditos")
+                }
+                for c in cursos_combinados
+            ]
+        }
+
 banner_sso_service = BannerSSOService()
