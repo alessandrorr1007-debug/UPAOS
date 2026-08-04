@@ -25,7 +25,7 @@
 
 ### Formato de salida del backend (`get_horario`)
 - Se agrupa por **curso** (`subject` + `courseNumber`), fusionando las secciones (CRNs) del mismo curso y los bloques consecutivos del mismo día.
-- Bloques: `{dia (0-6, LUN=0), dia_nombre (LUN..DOM), hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h}`. `hora_*` en `HH:MM`; `hora_*_12h` en `h:mm AM/PM`.
+- Bloques: `{dia (0-6, LUN=0), dia_nombre (LUN..DOM), hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h, aula}`. `hora_*` en `HH:MM`; `hora_*_12h` en `h:mm AM/PM`. `aula` = `buildingDescription + room` de `meetingTimes` (p. ej. `AULAS A 201`).
 - Ejemplo real verificado (2026-I): `HUMA 1185 METODOLOGIA DE LA INVESTIGACION CIENTIFICA` → Sáb 14:20-16:05 y Sáb 16:10-17:55 (coincide con el evento `getRegistrationEvents` visto en DevTools: CRN 3233, Sáb 2026-08-08 14:20-16:05).
 
 ### Endpoints descartados (para no volver a investigar)
@@ -53,5 +53,5 @@
 ## Contrato con la app Android
 - `HorarioResponse{success, periodo, total_cursos, total_bloques, cursos}`
 - `HorarioCurso{crn, codigo_materia, numero_curso, nombre, bloques}`
-- `HorarioBloque{dia (0-6, LUN=0 — solo informativo; la app usa dia_nombre), dia_nombre, hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h}`
+- `HorarioBloque{dia (0-6, LUN=0 — solo informativo; la app usa dia_nombre), dia_nombre, hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h, aula}`
 - App consume `https://upaos.onrender.com/`.

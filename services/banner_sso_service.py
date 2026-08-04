@@ -690,6 +690,7 @@ class BannerSSOService:
                 "hora_fin": hora_fin,
                 "hora_inicio_12h": self._a_12h(hora_inicio),
                 "hora_fin_12h": self._a_12h(hora_fin),
+                "aula": self._aula_de_meeting(ev) or ev.get("location"),
             })
 
         result = []
@@ -708,6 +709,14 @@ class BannerSSOService:
         if not isinstance(hhmm, str) or len(hhmm) != 4 or not hhmm.isdigit():
             return None
         return f"{hhmm[:2]}:{hhmm[2:]}"
+
+    @staticmethod
+    def _aula_de_meeting(mt: dict) -> str | None:
+        """'buildingDescription' + 'room' -> 'AULAS A 201'. None si no hay aula."""
+        room = mt.get("room")
+        building = mt.get("buildingDescription")
+        partes = [str(p).strip() for p in (building, room) if p]
+        return " ".join(partes) if partes else None
 
     @staticmethod
     def _desescapar_html(valor):
@@ -768,6 +777,7 @@ class BannerSSOService:
                             "hora_fin": fin,
                             "hora_inicio_12h": self._a_12h(inicio),
                             "hora_fin_12h": self._a_12h(fin),
+                            "aula": self._aula_de_meeting(mt),
                         })
                         break
 
