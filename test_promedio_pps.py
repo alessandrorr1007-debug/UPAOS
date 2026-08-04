@@ -61,5 +61,33 @@ class TestPromedioPonderado(unittest.TestCase):
         self.assertEqual(combinados[0]["creditos"], 4)
         self.assertIsNone(combinados[1]["creditos"])
 
+    def test_cruce_fallido_y_exclusion_curso(self):
+        """
+        Verifica que ante un cruce fallido (créditos null):
+        1. combinar_notas_creditos no lanza excepción y asigna creditos: None.
+        2. calcular_pps excluye ese curso del numerador y denominador.
+        Cursos válidos: 
+        - Curso A: nota 16, créditos 4 -> 64
+        - Curso B: nota 12, créditos 2 -> 24
+        - Curso C (cruce fallido): nota 20, créditos None -> Excluido
+        Resultado esperado: (64 + 24) / (4 + 2) = 88 / 6 = 14.6667
+        """
+        notas = [
+            {"crn": "1001", "nombre": "Curso A", "nota": 16.0},
+            {"crn": "1002", "nombre": "Curso B", "nota": 12.0},
+            {"crn": "9999", "nombre": "Curso C Sin Creditos", "nota": 20.0}
+        ]
+        horario = [
+            {"crn": "1001", "nombre": "Curso A", "creditos": 4},
+            {"crn": "1002", "nombre": "Curso B", "creditos": 2}
+        ]
+
+        combinados = banner_sso_service.combinar_notas_creditos(notas, horario)
+        self.assertIsNone(combinados[2]["creditos"])
+
+        pps = banner_sso_service.calcular_pps(combinados)
+        self.assertIsNotNone(pps)
+        self.assertEqual(round(pps, 4), 14.6667)
+
 if __name__ == "__main__":
     unittest.main()

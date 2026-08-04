@@ -2,7 +2,6 @@ import requests
 import time
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
-from datetime import date
 import json
 import re
 

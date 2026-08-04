@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 
 import bcrypt
