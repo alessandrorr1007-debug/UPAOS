@@ -1204,6 +1204,7 @@ class BannerSSOService:
         total_creditos = sum(c.get("creditos") for c in cursos_combinados if c.get("creditos") is not None)
 
         return {
+            "success": True,
             "periodo": periodo,
             "pps_oficial": pps_oficial,
             "pps_calculado": pps_calculado,
