@@ -172,11 +172,20 @@ def _llamar_banner(token: str, db: Session, func, *args):
 
     raise HTTPException(status_code=401, detail="sesion_expirada")
 
-def _verificar_admin(admin_usuario: str, db: Session) -> UserSetting:
-    user = db.query(UserSetting).filter(UserSetting.usuario_campus == admin_usuario, UserSetting.is_admin.is_(True)).first()
+def _requiere_admin(authorization: str, db: Session, admin_usuario: str | None = None) -> str:
+    token = (authorization or "").replace("Bearer ", "").strip()
+    usuario = _usuario_de_token(token)
+    if not usuario:
+        raise HTTPException(status_code=401, detail="sesion_expirada")
+    if admin_usuario and admin_usuario != usuario:
+        raise HTTPException(status_code=403, detail="Acceso denegado: requiere privilegios de administrador")
+    user = db.query(UserSetting).filter(
+        UserSetting.usuario_campus == usuario,
+        UserSetting.is_admin.is_(True)
+    ).first()
     if not user:
         raise HTTPException(status_code=403, detail="Acceso denegado: requiere privilegios de administrador")
-    return user
+    return usuario
 
 
 @app.get("/")
@@ -642,35 +651,35 @@ def admin_login(req: AdminLoginRequest, db: Session = Depends(get_db)):
     return {
         "success": True,
         "admin_usuario": user.usuario_campus,
-        "token": f"admin_sess_{user.usuario_campus}"
+        "token": f"sess_{user.usuario_campus}_admin"
     }
 
 @app.get("/admin/cuentas")
-def admin_cuentas(admin_usuario: str = "000000000", db: Session = Depends(get_db)):
-    _verificar_admin(admin_usuario, db)
+def admin_cuentas(authorization: str | None = Header(default=None, alias="Authorization"), admin_usuario: str = "000000000", db: Session = Depends(get_db)):
+    _requiere_admin(authorization, db, admin_usuario)
     return {"cuentas": features_service.listar_cuentas_registradas(db)}
 
 @app.get("/admin/sugerencias")
-def admin_sugerencias(admin_usuario: str = "000000000", db: Session = Depends(get_db)):
-    _verificar_admin(admin_usuario, db)
+def admin_sugerencias(authorization: str | None = Header(default=None, alias="Authorization"), admin_usuario: str = "000000000", db: Session = Depends(get_db)):
+    _requiere_admin(authorization, db, admin_usuario)
     return {"sugerencias": features_service.listar_todas_sugerencias(db)}
 
 @app.patch("/admin/sugerencias/{sugerencia_id}/estado")
-def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRequest, admin_usuario: str = "000000000", db: Session = Depends(get_db)):
-    _verificar_admin(admin_usuario, db)
+def admin_actualizar_sugerencia(sugerencia_id: int, req: AdminEstadoSugerenciaRequest, authorization: str | None = Header(default=None, alias="Authorization"), admin_usuario: str = "000000000", db: Session = Depends(get_db)):
+    _requiere_admin(authorization, db, admin_usuario)
     try:
         return features_service.actualizar_estado_sugerencia(db, sugerencia_id, req.estado)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/admin/semana")
-def admin_establecer_semana(req: AdminSemanaRequest, admin_usuario: str = "000000000", db: Session = Depends(get_db)):
-    _verificar_admin(admin_usuario, db)
+def admin_establecer_semana(req: AdminSemanaRequest, authorization: str | None = Header(default=None, alias="Authorization"), admin_usuario: str = "000000000", db: Session = Depends(get_db)):
+    _requiere_admin(authorization, db, admin_usuario)
     return features_service.establecer_semana_inicio(db, req.fecha_inicio)
 
 @app.get("/admin/metricas")
-def admin_metricas(admin_usuario: str = "000000000", db: Session = Depends(get_db)):
-    _verificar_admin(admin_usuario, db)
+def admin_metricas(authorization: str | None = Header(default=None, alias="Authorization"), admin_usuario: str = "000000000", db: Session = Depends(get_db)):
+    _requiere_admin(authorization, db, admin_usuario)
     return {
         "dau_30_dias": features_service.serie_dau(db, 30),
         "cuentas_activas_hoy": features_service.cuentas_activas_hoy(db),
