@@ -1145,9 +1145,11 @@ class BannerSSOService:
     def calcular_pps(cursos: list) -> float | None:
         """
         Cálculo del Promedio Ponderado Semestral (PPS):
-        PPS = Σ(nota * creditos) / Σ(creditos)
+        PPS = Σ(redondear(nota) * creditos) / Σ(creditos)
+        Cada nota se redondea internamente a entero (>= .5 sube) antes de aplicar la fórmula,
+        tal como lo muestra el portal de la UPAO (ej: 10.66 -> 11).
         Si algún curso no tiene créditos o nota válida (None), se excluye y advierte.
-        Conserva precisión decimal.
+        Conserva precisión decimal en el resultado final.
         """
         cursos_validos = []
         for c in cursos or []:
@@ -1169,7 +1171,7 @@ class BannerSSOService:
         if not cursos_validos:
             return None
 
-        suma_ponderada = sum(nota * cred for nota, cred in cursos_validos)
+        suma_ponderada = sum(int(nota + 0.5) * cred for nota, cred in cursos_validos)
         total_creditos = sum(cred for _, cred in cursos_validos)
         if total_creditos <= 0:
             return None
