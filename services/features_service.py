@@ -18,7 +18,7 @@ from database import (
 # ---------------------------------------------------------------------------
 # Constantes del spec de funcionalidades
 # ---------------------------------------------------------------------------
-MIN_RANKING_USUARIOS = 5          # 1.2: mínimo de participantes para mostrar posición
+MIN_RANKING_USUARIOS = 2          # 1.2: mínimo de participantes para mostrar posición
 SUGERENCIAS_POR_DIA = 3           # 1.1: límite anti-spam de sugerencias por día
 SUGERENCIA_MIN_LEN = 10           # 1.1: longitud mínima del texto
 SUGERENCIA_MAX_LEN = 500          # 1.1: longitud máxima del texto

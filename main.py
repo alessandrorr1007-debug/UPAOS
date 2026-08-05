@@ -211,11 +211,13 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
                 "success": True,
                 "token": token,
                 "usuario": req.usuario,
+                "es_admin": True,
                 "message": "Sesión administrativa iniciada correctamente"
             }
 
     result = scraper_service.login(req.usuario, req.password)
     if result.get("success"):
+        result["es_admin"] = False
         existing_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
         if not existing_user:
             existing_user = UserSetting(

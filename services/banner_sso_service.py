@@ -1079,6 +1079,9 @@ class BannerSSOService:
                             or item.get("creditHourLow")
                             or item.get("credits")
                             or item.get("creditHourHigh")
+                            or item.get("hoursAttempted")
+                            or item.get("hoursEarned")
+                            or item.get("gpaHours")
                         )
                         creditos_num = None
                         if creditos_val is not None:
@@ -1212,8 +1215,8 @@ class BannerSSOService:
             "total_creditos": total_creditos if total_creditos > 0 else None,
             "cursos": [
                 {
-                    "crn": c.get("crn", ""),
-                    "nombre": c.get("nombre", ""),
+                    "crn": str(c.get("courseReferenceNumber") or c.get("crn") or c.get("id") or ""),
+                    "nombre": c.get("courseTitle") or c.get("subjectDescription") or c.get("nombre") or "",
                     "nota": c.get("nota_actual") if c.get("nota_actual") is not None else c.get("nota"),
                     "creditos": c.get("creditos")
                 }
