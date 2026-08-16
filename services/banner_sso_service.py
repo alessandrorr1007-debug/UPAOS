@@ -1183,6 +1183,16 @@ class BannerSSOService:
         Obtiene el resumen de promedio del periodo (PPS oficial vs calculado).
         1. Intenta obtener el pps_oficial directamente del portal (Cuadro de Mérito si existe).
         2. Scrapea los créditos del periodo y combina con las notas para pps_calculado.
+
+        NOTA (verificado 2026-08, sesión real): el endpoint del Cuadro de Mérito NO está
+        publicado en la instalación de Banner SSB de la UPAO — `.../ssb/studentMerit` (y
+        `.../ssb/studentGrades/studentMerit`, el path que se construye aquí) responden 404
+        HTML, y la página autenticada de `studentGrades` no referencia "merit"/"pps"/"cuadro".
+        Por eso `pps_oficial` casi siempre es None y se usa `pps_calculado`. Esto es un
+        comportamiento esperado del portal, NO un bug del scraper: el try/except de abajo
+        captura el fallo y degrada a "calculado". Si UPAO publica el cuadro de mérito algún
+        día, la ruta estándar de Banner sería `.../ssb/studentMerit` (hermana de studentGrades,
+        no anidada dentro de ella) y devolvería JSON con una clave tipo "pps".
         """
         pps_oficial = None
         fuente = "calculado"
