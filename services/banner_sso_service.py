@@ -495,6 +495,63 @@ class BannerSSOService:
             "raw": item
         }
 
+    @staticmethod
+    def _agrupar_asistencia(asistencia_plana: list) -> tuple[list, int]:
+        """
+        Banner devuelve una sección/CRN por cada componente del mismo curso
+        (Teoría, Práctica, Laboratorio) sin un campo de tipo de componente.
+        Se agrupa por (periodo, codigo_materia, curso) usando el mismo
+        nombre_curso como respaldo, ya que todos los componentes comparten
+        courseNumber + subjectCode + sectionTitle. Devuelve (cursos, total_secciones).
+        """
+        grupos: dict[tuple, dict] = {}
+        orden: list[tuple] = []
+
+        def _clave(item: dict) -> tuple:
+            return (
+                item.get("periodo"),
+                item.get("codigo_materia"),
+                item.get("curso"),
+                item.get("nombre_curso"),
+            )
+
+        for item in asistencia_plana:
+            clave = _clave(item)
+            if clave not in grupos:
+                grupos[clave] = {
+                    "crn": item.get("crn"),
+                    "materia": item.get("materia"),
+                    "codigo_materia": item.get("codigo_materia"),
+                    "nombre_curso": item.get("nombre_curso"),
+                    "periodo": item.get("periodo"),
+                    "horario_dias": item.get("horario_dias"),
+                    "hora": item.get("hora"),
+                    "hora_12h": item.get("hora_12h"),
+                    "componentes": [],
+                }
+                orden.append(clave)
+            grupos[clave]["componentes"].append({
+                "crn": item.get("crn"),
+                "seccion": item.get("seccion"),
+                "porcentaje": item.get("porcentaje"),
+                "faltas": item.get("faltas"),
+                "horario_dias": item.get("horario_dias"),
+                "hora_12h": item.get("hora_12h"),
+                "sectionMeetingId": item.get("sectionMeetingId"),
+            })
+
+        agrupada = []
+        for clave in orden:
+            g = grupos[clave]
+            comps = g["componentes"]
+            pcts = [c["porcentaje"] for c in comps if c["porcentaje"] is not None]
+            g["porcentaje"] = round(sum(pcts) / len(pcts), 1) if pcts else None
+            g["faltas"] = sum(c["faltas"] or 0 for c in comps)
+            g["total_secciones"] = len(comps)
+            agrupada.append(g)
+
+        return agrupada, len(asistencia_plana)
+
     def get_attendance(self, session: requests.Session, page_max_size: int = 50) -> dict:
         """
         GET getRegisteredSections (API JSON directa de Banner, reutiliza la sesión
@@ -548,16 +605,18 @@ class BannerSSOService:
                     break
                 offset += page_max_size
 
-            asistencia = [
+            asistencia_plana = [
                 self._normalizar_asistencia(item)
                 for item in all_items if isinstance(item, dict)
             ]
-            print(f"[Banner Log] getRegisteredSections OK: {len(asistencia)} registros de asistencia.")
+            agrupada, total_secciones = self._agrupar_asistencia(asistencia_plana)
+            print(f"[Banner Log] getRegisteredSections OK: {len(asistencia_plana)} secciones agrupadas en {len(agrupada)} cursos.")
             return {
                 "success": True,
-                "totalCount": len(asistencia),
+                "totalCount": len(agrupada),
+                "total_secciones": total_secciones,
                 "raw_totalCount": total_count,
-                "asistencia": asistencia
+                "asistencia": agrupada
             }
         except Exception as e:
             print(f"[Banner Error] Excepción en get_attendance: {e}")
