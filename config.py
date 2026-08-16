@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     SSB_GRADES_URL: str = os.getenv("SSB_GRADES_URL", "https://ssb.upao.edu.pe/StudentSelfService/ssb/studentGrades")
     SSO_LOGIN_URL: str = os.getenv("SSO_LOGIN_URL", "https://upaosso.upao.edu.pe:410/Account/Login")
 
-    FERNET_KEY: str = os.getenv("FERNET_KEY", os.getenv("SECRET_KEY", "b3ZlcnJpZGVfdGhpc193aXRoX2FfcmVhbF9mZXJuZXRfa2V5X2luX3Byb2Q="))
+    FERNET_KEY: str = os.getenv("FERNET_KEY", os.getenv("SECRET_KEY", "AekYrdvES-txYMoPb6t1YiBMEyoE26ZmrwgJOTiMv3Q="))
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./app_data.db")
     TESSERACT_CMD: str = os.getenv("TESSERACT_CMD", "/usr/bin/tesseract")
 
