@@ -101,12 +101,14 @@ act = features_service.cuentas_activas_hoy(db)
 db.close()
 check("serie_dau 30 dias", len(dau) == 30 and act >= 1, f"activos_hoy={act}")
 
-# 15. seed admin idempotente
+# 15. seed admin idempotente (fuente de verdad: constantes de features_service)
 db = SessionLocal()
 features_service.asegurar_admin(db)
-admin = db.query(UserSetting).filter(UserSetting.usuario_campus == "000002006").first()
+admin = db.query(UserSetting).filter(
+    UserSetting.usuario_campus == features_service.ADMIN_USUARIO
+).first()
 check("seed admin", admin is not None and admin.is_admin and admin.admin_password_hash, "")
-check("verificar admin pass ok", features_service.verificar_password_admin(admin, "AlessandroAdmin"), "")
+check("verificar admin pass ok", features_service.verificar_password_admin(admin, features_service.ADMIN_PASSWORD_PLAIN), "")
 check("verificar admin pass mal", not features_service.verificar_password_admin(admin, "wrong"), "")
 features_service.asegurar_admin(db)
 db.close()
