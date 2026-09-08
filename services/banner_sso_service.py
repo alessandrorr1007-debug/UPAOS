@@ -3,6 +3,7 @@ import time
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
 
@@ -22,6 +23,9 @@ class BannerSSOService:
         )
         self.inscripcion_get_registration_events_url = (
             f"{self.inscripcion_base_url}/classRegistration/getRegistrationEvents"
+        )
+        self.inscripcion_meeting_information_url = (
+            f"{self.inscripcion_base_url}/classRegistration/getMeetingInformationForRegistrations"
         )
 
     def login_sso(self, username: str, password: str) -> tuple[bool, str, requests.Session | None]:
@@ -682,12 +686,68 @@ class BannerSSOService:
         except (TypeError, ValueError):
             return None
 
-    @staticmethod
-    def _fusionar_bloques(bloques: list) -> list:
+    @classmethod
+    def _clean_str(cls, s) -> str | None:
+        """Desescapa HTML y normaliza espacios en blanco."""
+        if s is None:
+            return None
+        cleaned = " ".join(cls._desescapar_html(str(s)).split()).strip()
+        return cleaned if cleaned else None
+
+    @classmethod
+    def _extraer_nombre_profesor(cls, faculty_list: list) -> str | None:
+        """
+        Extrae y normaliza los nombres de los profesores desde la lista 'faculty'.
+        Si hay múltiples profesores, los une con ', '.
+        """
+        if not isinstance(faculty_list, list) or not faculty_list:
+            return None
+        nombres = []
+        for f in faculty_list:
+            if isinstance(f, dict):
+                name = f.get("displayName") or f.get("name") or f.get("instructorName")
+                cn = cls._clean_str(name)
+                if cn and cn not in nombres:
+                    nombres.append(cn)
+            elif isinstance(f, str) and f.strip():
+                cn = cls._clean_str(f)
+                if cn and cn not in nombres:
+                    nombres.append(cn)
+        return ", ".join(nombres) if nombres else None
+
+    @classmethod
+    def _extraer_edificio(cls, mt: dict) -> str | None:
+        """
+        Extrae la descripción del edificio ('buildingDescription'),
+        haciendo fallback al código de edificio ('building') si está vacía.
+        """
+        if not isinstance(mt, dict):
+            return None
+        bldg = mt.get("buildingDescription") or mt.get("building")
+        return cls._clean_str(bldg)
+
+    @classmethod
+    def _extraer_salon(cls, mt: dict) -> str | None:
+        """Extrae el número de aula/habitación ('room')."""
+        if not isinstance(mt, dict):
+            return None
+        return cls._clean_str(mt.get("room"))
+
+    @classmethod
+    def _aula_de_meeting(cls, mt: dict) -> str | None:
+        """'buildingDescription' + 'room' -> 'PABELLÓN G G701'. None si no hay aula."""
+        edificio = cls._extraer_edificio(mt)
+        salon = cls._extraer_salon(mt)
+        partes = [p for p in (edificio, salon) if p]
+        return " ".join(partes) if partes else None
+
+    @classmethod
+    def _fusionar_bloques(cls, bloques: list) -> list:
         """
         Une bloques consecutivos del mismo día (fin == inicio del siguiente)
         en un solo rango, p. ej. dos eventos de una misma clase de 2 horas
         continuas se muestran como un único bloque 07:00-10:00.
+        Preserva profesor, edificio, salón y aula.
         """
         if not bloques:
             return []
@@ -704,20 +764,111 @@ class BannerSSOService:
                 if b["hora_inicio"] == ultimo.get("hora_fin"):
                     ultimo["hora_fin"] = b["hora_fin"]
                     ultimo["hora_fin_12h"] = b["hora_fin_12h"]
+                    if not ultimo.get("aula") and b.get("aula"):
+                        ultimo["aula"] = b["aula"]
+                    if not ultimo.get("edificio") and b.get("edificio"):
+                        ultimo["edificio"] = b["edificio"]
+                    if not ultimo.get("salon") and b.get("salon"):
+                        ultimo["salon"] = b["salon"]
+                    if not ultimo.get("nombre_profesor") and b.get("nombre_profesor"):
+                        ultimo["nombre_profesor"] = b["nombre_profesor"]
                 else:
                     merged.append(dict(b))
             result.extend(merged)
         return result
 
-    def _agrupar_horario(self, eventos: list, term: str) -> list:
+    def get_meeting_information_for_registrations(
+        self, session: requests.Session, term: str, crn: str | None = None
+    ) -> list:
+        """
+        Consulta getMeetingInformationForRegistrations en Banner 9 SSB:
+        GET https://inscripcion.upao.edu.pe/StudentRegistrationSsb/ssb/classRegistration/getMeetingInformationForRegistrations
+        Devuelve la lista de secciones registradas con detalle de faculty (profesor),
+        building, buildingDescription y room.
+        """
+        try:
+            self._preparar_sesion_inscripcion(session)
+            session.headers.update({
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": f"{self.inscripcion_base_url}/classRegistration/classRegistration",
+            })
+            params = {"term": term}
+            if crn:
+                params["courseReferenceNumber"] = str(crn)
+
+            res = session.get(
+                self.inscripcion_meeting_information_url,
+                params=params,
+                timeout=15,
+                allow_redirects=True,
+            )
+            if res.status_code == 200:
+                try:
+                    data = res.json()
+                except (ValueError, TypeError):
+                    data = None
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    return data.get("data", []) or data.get("items", []) or []
+            print(f"[Banner Log] getMeetingInformationForRegistrations (crn={crn}) status: {res.status_code}")
+            return []
+        except Exception as e:
+            print(f"[Banner Warning] Excepción en get_meeting_information_for_registrations (crn={crn}): {e}")
+            return []
+
+    def get_meeting_information_map(
+        self, session: requests.Session, term: str, crns: list | None = None
+    ) -> dict[str, dict]:
+        """
+        Obtiene un diccionario {CRN: meeting_info_dict} para el periodo dado.
+        Primero intenta una llamada bulk (rápida). Si faltan CRNs específicos,
+        los consulta en paralelo utilizando un ThreadPoolExecutor.
+        """
+        meeting_map: dict[str, dict] = {}
+        try:
+            items_bulk = self.get_meeting_information_for_registrations(session, term)
+            for item in items_bulk:
+                if isinstance(item, dict):
+                    c = item.get("courseReferenceNumber") or item.get("crn")
+                    if c:
+                        meeting_map[str(c)] = item
+        except Exception as e:
+            print(f"[Banner Warning] Error en bulk get_meeting_information_map: {e}")
+
+        # Si se indicaron CRNs y alguno no vino en el bulk, consultar en paralelo
+        crns_faltantes = [str(c) for c in (crns or []) if str(c) not in meeting_map]
+        if crns_faltantes:
+            def _fetch_single(c_str):
+                items = self.get_meeting_information_for_registrations(session, term, crn=c_str)
+                return c_str, items[0] if items and isinstance(items, list) else None
+
+            try:
+                with ThreadPoolExecutor(max_workers=min(5, len(crns_faltantes))) as executor:
+                    futuros = [executor.submit(_fetch_single, c) for c in crns_faltantes]
+                    for f in as_completed(futuros, timeout=10):
+                        try:
+                            c_id, info = f.result()
+                            if info and isinstance(info, dict):
+                                meeting_map[c_id] = info
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[Banner Warning] Error en llamadas paralelas por CRN: {e}")
+
+        return meeting_map
+
+    def _agrupar_horario(self, eventos: list, term: str, meeting_info_map: dict | None = None) -> list:
         """
         Agrupa los eventos crudos de getRegistrationEvents por curso (crn) y por
-        día de la semana. Devuelve una estructura simple para el frontend:
-        [{crn, codigo_materia, numero_curso, nombre, bloques:[{dia, dia_nombre,
-        hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h}]}]
+        día de la semana. Enriquecido con profesor, edificio y salón si se provee
+        meeting_info_map.
         """
         dias_nombres = ["LUN", "MAR", "MIE", "JUE", "VIE", "SAB", "DOM"]
         cursos: dict[str, dict] = {}
+        meeting_info_map = meeting_info_map or {}
+
         for ev in eventos:
             if not isinstance(ev, dict):
                 continue
@@ -732,16 +883,25 @@ class BannerSSOService:
             hora_fin = fin[1] if fin else None
 
             clave = str(crn)
+            info_extra = meeting_info_map.get(clave) or {}
+            prof_curso = self._extraer_nombre_profesor(info_extra.get("faculty"))
+
             curso = cursos.get(clave)
             if curso is None:
                 curso = {
                     "crn": clave,
                     "codigo_materia": ev.get("subject"),
                     "numero_curso": ev.get("courseNumber"),
-                    "nombre": ev.get("title") or ev.get("courseTitle") or "Curso",
+                    "nombre": self._clean_str(ev.get("title") or ev.get("courseTitle")) or "Curso",
+                    "nombre_profesor": prof_curso,
                     "bloques": [],
                 }
                 cursos[clave] = curso
+
+            edificio = self._extraer_edificio(ev) or self._extraer_edificio(info_extra)
+            salon = self._extraer_salon(ev) or self._extraer_salon(info_extra)
+            aula = self._aula_de_meeting(ev) or self._aula_de_meeting(info_extra) or ev.get("location")
+
             curso["bloques"].append({
                 "dia": dia,
                 "dia_nombre": dias_nombres[dia] if 0 <= dia < 7 else str(dia),
@@ -749,7 +909,10 @@ class BannerSSOService:
                 "hora_fin": hora_fin,
                 "hora_inicio_12h": self._a_12h(hora_inicio),
                 "hora_fin_12h": self._a_12h(hora_fin),
-                "aula": self._aula_de_meeting(ev) or ev.get("location"),
+                "aula": aula,
+                "nombre_profesor": prof_curso,
+                "edificio": edificio,
+                "salon": salon,
             })
 
         result = []
@@ -777,28 +940,21 @@ class BannerSSOService:
         from html import unescape
         return unescape(valor)
 
-    @staticmethod
-    def _aula_de_meeting(mt: dict) -> str | None:
-        """'buildingDescription' + 'room' -> 'PABELLÓN G G701'. None si no hay aula."""
-        from html import unescape
-        room = mt.get("room")
-        building = mt.get("buildingDescription")
-        partes = [unescape(str(p)).strip() for p in (building, room) if p]
-        return unescape(" ".join(partes)) if partes else None
-
-    def _agrupar_horario_desde_registros(self, registros: list, term: str) -> list:
+    def _agrupar_horario_desde_registros(
+        self, registros: list, term: str, meeting_info_map: dict | None = None
+    ) -> list:
         """
         Construye la estructura de horario a partir de data.registrations de
-        registrationHistory/reset (página 'View Registration Information' →
-        tab Lookup Schedule). El endpoint devuelve una fila por CRN registrado
-        (teoría/práctica van como CRNs distintos del mismo curso), cada una con
-        meetingTimes (beginTime/endTime en 'HHMM' y flags por día). Se agrupa por
-        curso (subject + courseNumber) fusionando todas sus secciones, y por día,
-        fusionando bloques consecutivos del mismo día.
+        registrationHistory/reset. Se agrupa por curso (subject + courseNumber)
+        fusionando todas sus secciones, y por día, fusionando bloques consecutivos
+        del mismo día.
+        Enriquece cada bloque con nombre_profesor, edificio y salon.
         """
         dias_nombres = ["LUN", "MAR", "MIE", "JUE", "VIE", "SAB", "DOM"]
         flag_dias = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         cursos: dict[str, dict] = {}
+        meeting_info_map = meeting_info_map or {}
+
         for reg in registros:
             if not isinstance(reg, dict):
                 continue
@@ -811,23 +967,49 @@ class BannerSSOService:
                 clave = f"{subject}|{numero}"
             else:
                 clave = f"crn:{crn}"
+
+            info_extra = meeting_info_map.get(str(crn)) or {}
+            prof_curso = (
+                self._extraer_nombre_profesor(info_extra.get("faculty"))
+                or self._extraer_nombre_profesor(reg.get("faculty"))
+            )
+
             curso = cursos.get(clave)
             if curso is None:
                 curso = {
                     "crn": str(crn) if crn is not None else clave,
                     "codigo_materia": subject,
                     "numero_curso": numero,
-                    "nombre": self._desescapar_html(reg.get("courseTitle")) or "Curso",
+                    "nombre": self._clean_str(reg.get("courseTitle")) or "Curso",
+                    "nombre_profesor": prof_curso,
                     "bloques": [],
                 }
                 cursos[clave] = curso
-            for mt in reg.get("meetingTimes") or []:
+            elif prof_curso and not curso.get("nombre_profesor"):
+                curso["nombre_profesor"] = prof_curso
+
+            meeting_times = reg.get("meetingTimes") or info_extra.get("meetingTimes") or []
+            meetings_faculty = reg.get("meetingsFaculty") or info_extra.get("meetingsFaculty") or []
+
+            for idx_mt, mt in enumerate(meeting_times):
                 if not isinstance(mt, dict):
                     continue
                 inicio = self._hora_hhmm_a_formato(mt.get("beginTime"))
                 fin = self._hora_hhmm_a_formato(mt.get("endTime"))
                 if inicio is None:
                     continue
+
+                prof_bloque = prof_curso
+                if idx_mt < len(meetings_faculty) and isinstance(meetings_faculty[idx_mt], dict):
+                    mf_fac = meetings_faculty[idx_mt].get("faculty")
+                    mf_prof = self._extraer_nombre_profesor(mf_fac)
+                    if mf_prof:
+                        prof_bloque = mf_prof
+
+                edificio = self._extraer_edificio(mt)
+                salon = self._extraer_salon(mt)
+                aula = self._aula_de_meeting(mt)
+
                 for idx, flag in enumerate(flag_dias):
                     if mt.get(flag):
                         curso["bloques"].append({
@@ -837,7 +1019,10 @@ class BannerSSOService:
                             "hora_fin": fin,
                             "hora_inicio_12h": self._a_12h(inicio),
                             "hora_fin_12h": self._a_12h(fin),
-                            "aula": self._aula_de_meeting(mt),
+                            "aula": aula,
+                            "nombre_profesor": prof_bloque,
+                            "edificio": edificio,
+                            "salon": salon,
                         })
                         break
 
@@ -855,13 +1040,9 @@ class BannerSSOService:
         """
         Horario semanal de inscripcion.upao.edu.pe (Banner Student Registration),
         página 'View Registration Information' → endpoint registrationHistory/reset
-        (tab Lookup Schedule). Reutiliza la sesión SSO de Banner; el subdominio
-        distinto se resuelve solo con el intercambio SSO automático (1 GET al login
-        del subdominio). El endpoint devuelve las inscripciones reales del periodo
-        (una fila por CRN registrado, con meetingTimes: día + hora inicio/fin) y
-        filtra correctamente por term. Si no hay registros, se intenta el
-        calendario getRegistrationEvents (requiere que el periodo esté activo en
-        la sesión).
+        (tab Lookup Schedule) enriquecido con getMeetingInformationForRegistrations.
+        Reutiliza la sesión SSO de Banner.
+        Devuelve las inscripciones del periodo con nombre_profesor, edificio y salon.
         """
         try:
             self._preparar_sesion_inscripcion(session)
@@ -892,6 +1073,20 @@ class BannerSSOService:
                     if not isinstance(registros, list):
                         registros = []
 
+            # Extraer lista de CRNs para enriquecer
+            crns = []
+            for r in registros:
+                c = r.get("courseReferenceNumber") or r.get("crn")
+                if c:
+                    crns.append(str(c))
+
+            # Consultar información detallada de reuniones y docentes
+            meeting_info_map = {}
+            try:
+                meeting_info_map = self.get_meeting_information_map(session, term, crns=crns)
+            except Exception as ex_mi:
+                print(f"[Banner Warning] No se pudo obtener meeting_info_map: {ex_mi}")
+
             if not registros:
                 print(f"[Banner Log] Sin registros vía reset; intentando getRegistrationEvents.")
                 res = session.get(
@@ -909,9 +1104,14 @@ class BannerSSOService:
                         data = None
                     if isinstance(data, list):
                         eventos = data
-                cursos = self._agrupar_horario(eventos, term)
+
+                if not meeting_info_map:
+                    event_crns = [str(ev.get("crn")) for ev in eventos if ev.get("crn")]
+                    meeting_info_map = self.get_meeting_information_map(session, term, crns=event_crns)
+
+                cursos = self._agrupar_horario(eventos, term, meeting_info_map)
             else:
-                cursos = self._agrupar_horario_desde_registros(registros, term)
+                cursos = self._agrupar_horario_desde_registros(registros, term, meeting_info_map)
 
             print(f"[Banner Log] Horario OK: {len(cursos)} cursos, "
                   f"{sum(len(c['bloques']) for c in cursos)} bloques.")

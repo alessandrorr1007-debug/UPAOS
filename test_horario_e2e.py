@@ -59,10 +59,10 @@ def main():
     parsed = banner_sso_service.get_horario(session, term)
     print(json.dumps({k: v for k, v in parsed.items() if k != "cursos"}, ensure_ascii=False, indent=2))
     for c in parsed.get("cursos", []):
-        print(f"- {c['nombre']} [{c.get('codigo_materia')} {c.get('numero_curso')}] (CRN {c['crn']})")
+        print(f"- {c['nombre']} [{c.get('codigo_materia')} {c.get('numero_curso')}] (CRN {c['crn']}) - Prof: {c.get('nombre_profesor')}")
         for b in c["bloques"]:
             print(f"    {b['dia_nombre']} {b.get('hora_inicio_12h') or b.get('hora_inicio')} - "
-                  f"{b.get('hora_fin_12h') or b.get('hora_fin')}")
+                  f"{b.get('hora_fin_12h') or b.get('hora_fin')} | Aula: {b.get('aula')} | Prof: {b.get('nombre_profesor')} | Edificio: {b.get('edificio')} | Salon: {b.get('salon')}")
 
     print(f"\n=== 5. registrationHistory/reset en varios periodos ===")
     for t in ["202610", "202510", "202410"]:

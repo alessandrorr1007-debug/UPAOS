@@ -7,3 +7,4 @@ __pycache__/
 .vscode/
 .idea/
 *-firebase-adminsdk-*.json
+step1_raw_meeting_info.json

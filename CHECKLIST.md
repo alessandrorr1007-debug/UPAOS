@@ -25,15 +25,15 @@
 
 ### Formato de salida del backend (`get_horario`)
 - Se agrupa por **curso** (`subject` + `courseNumber`), fusionando las secciones (CRNs) del mismo curso y los bloques consecutivos del mismo día.
-- Bloques: `{dia (0-6, LUN=0), dia_nombre (LUN..DOM), hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h, aula}`. `hora_*` en `HH:MM`; `hora_*_12h` en `h:mm AM/PM`. `aula` = `buildingDescription + room` de `meetingTimes` (p. ej. `AULAS A 201`).
-- Ejemplo real verificado (2026-I): `HUMA 1185 METODOLOGIA DE LA INVESTIGACION CIENTIFICA` → Sáb 14:20-16:05 y Sáb 16:10-17:55 (coincide con el evento `getRegistrationEvents` visto en DevTools: CRN 3233, Sáb 2026-08-08 14:20-16:05).
+- Bloques: `{dia (0-6, LUN=0), dia_nombre (LUN..DOM), hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h, aula, nombre_profesor, edificio, salon}`. `hora_*` en `HH:MM`; `hora_*_12h` en `h:mm AM/PM`. `aula` = `buildingDescription + room` de `meetingTimes` (p. ej. `PABELLÓN G G701`). `nombre_profesor` = profesor asignado a la sección o reunión; `edificio` = nombre o código del edificio; `salon` = aula/número de salón.
+- Ejemplo real verificado (2026-I): `HUMA 1185 METODOLOGIA DE LA INVESTIGACION CIENTIFICA` → Sáb 14:20-16:05 y Sáb 16:10-17:55 (Profesor: `CASTILLO MOSTACERO, SANTIAGO`).
 
-### Endpoints descartados (para no volver a investigar)
+### Endpoints
+- `classRegistration/getMeetingInformationForRegistrations` → endpoint Banner 9 SSB utilizado para enriquecer por CRN o en bulk el docente (`faculty`), edificio (`buildingDescription`/`building`) y aula (`room`).
 - `classRegistration/getRegistrationEvents?termFilter=` → devuelve eventos de calendario **solo si el periodo está "activo" en la sesión** (requiere el flujo de elegibilidad). En sesión nueva devuelve `[]` siempre. Se deja como fallback.
 - `term/termSelection` + `POST term/saveTerm` + `POST term/search?mode=registration` → el paso de selección de periodo. `term/search` responde `regAllowed: false, "Term not eligible for registration"` fuera de la ventana de inscripción, bloqueando el flujo → no usar para horario.
 - `classRegistration/classRegistration` → redirige a `/ssb/registration/registration` (página sin `#getRegistrationEvents`).
 - `registrationHistory/renderActiveRegistrations` → devuelve la inscripción **activa** y **ignora el parámetro `term`** (siempre el periodo actual) → solo útil para el periodo vigente.
-- `classRegistration/getMeetingInformationForRegistrations` → lista semanal; devuelve `[]` en sesión nueva (misma limitación de periodo activo).
 - `registrationHistory/getRegistrationItems` → `403 access denied`.
 
 ### Periodos (`term`)
@@ -42,7 +42,7 @@
 - La app usa por defecto `"202610"`.
 
 ### Archivos clave
-- `services/banner_sso_service.py`: `get_horario`, `_preparar_sesion_inscripcion`, `_agrupar_horario_desde_registros`, `_hora_hhmm_a_formato`, `_desescapar_html`, `_fusionar_bloques`.
+- `services/banner_sso_service.py`: `get_horario`, `get_meeting_information_for_registrations`, `get_meeting_information_map`, `_preparar_sesion_inscripcion`, `_agrupar_horario_desde_registros`, `_hora_hhmm_a_formato`, `_desescapar_html`, `_fusionar_bloques`.
 - `services/scraper_service.py`: `login()` (SSO primero, fallback ASP.NET legado), `ACTIVE_SESSIONS`.
 - `main.py`: endpoint `/horario`.
 - `test_horario_e2e.py`: prueba end-to-end (login real + raw `reset` + parseo + varios periodos).
@@ -52,6 +52,6 @@
 
 ## Contrato con la app Android
 - `HorarioResponse{success, periodo, total_cursos, total_bloques, cursos}`
-- `HorarioCurso{crn, codigo_materia, numero_curso, nombre, bloques}`
-- `HorarioBloque{dia (0-6, LUN=0 — solo informativo; la app usa dia_nombre), dia_nombre, hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h, aula}`
+- `HorarioCurso{crn, codigo_materia, numero_curso, nombre, nombre_profesor, bloques}`
+- `HorarioBloque{dia (0-6, LUN=0 — solo informativo; la app usa dia_nombre), dia_nombre, hora_inicio, hora_fin, hora_inicio_12h, hora_fin_12h, aula, nombre_profesor, edificio, salon}`
 - App consume `https://upaos.onrender.com/`.
