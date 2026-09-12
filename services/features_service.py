@@ -163,8 +163,10 @@ def listar_todas_sugerencias(db: Session, solo_pendientes: bool = False) -> list
         {
             "id": s.id,
             "usuario": s.usuario_banner,
+            "usuario_banner": s.usuario_banner,
             "texto": s.texto,
             "estado": s.estado,
+            "fecha": s.fecha_creacion.isoformat() if s.fecha_creacion else None,
             "fecha_creacion": s.fecha_creacion.isoformat() if s.fecha_creacion else None,
         }
         for s in filas
@@ -172,12 +174,18 @@ def listar_todas_sugerencias(db: Session, solo_pendientes: bool = False) -> list
 
 
 def actualizar_estado_sugerencia(db: Session, sugerencia_id: int, estado: str) -> dict:
-    if estado not in ("pendiente", "en_revision", "aprobada", "rechazada"):
+    mapeo_alias = {
+        "visto": "en_revision",
+        "resuelto": "aprobada",
+        "descartado": "rechazada",
+    }
+    estado_normalizado = mapeo_alias.get(estado, estado)
+    if estado_normalizado not in ("pendiente", "en_revision", "aprobada", "rechazada"):
         raise ValueError("Estado inválido. Use: pendiente, en_revision, aprobada o rechazada.")
     sugerencia = db.query(Sugerencia).filter(Sugerencia.id == sugerencia_id).first()
     if not sugerencia:
         raise ValueError("Sugerencia no encontrada.")
-    sugerencia.estado = estado
+    sugerencia.estado = estado_normalizado
     db.commit()
     return {"id": sugerencia.id, "estado": sugerencia.estado}
 
@@ -341,12 +349,14 @@ def listar_cuentas_registradas(db: Session) -> list:
     return [
         {
             "usuario": u.usuario_campus,
+            "usuario_campus": u.usuario_campus,
             "nombre": u.nombre,
             "is_admin": bool(u.is_admin),
             "ranking_optin": bool(u.ranking_optin),
             "auto_check_enabled": bool(u.auto_check_enabled),
             "tiene_password_guardada": bool(u.password_encriptada),
             "fecha_primer_login": u.fecha_primer_login.isoformat() if u.fecha_primer_login else None,
+            "ultimo_login": u.ultima_revision.isoformat() if u.ultima_revision else None,
             "ultima_revision": u.ultima_revision.isoformat() if u.ultima_revision else None,
         }
         for u in filas
