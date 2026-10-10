@@ -1,4 +1,7 @@
 import base64
+import secrets
+import time
+from threading import Lock
 import requests
 from bs4 import BeautifulSoup
 from config import settings
@@ -19,13 +22,20 @@ class CampusScraperService:
         self.login_url = settings.CAMPUS_URL
         self.captcha_url = settings.CAPTCHA_URL
         self.notas_url = settings.NOTAS_URL
+        self._captcha_challenges = {}
+        self._captcha_lock = Lock()
 
-    def login(self, username: str, password: str, manual_captcha: str | None = None) -> dict:
+    def login(self, username: str, password: str, manual_captcha: str | None = None, captcha_id: str | None = None) -> dict:
         """
         Método unificado de login:
         1. Intenta primero el nuevo flujo oficial Ellucian Banner SSB (SSO sin Captcha).
         2. Si falla o está en mantenimiento, intenta el flujo legado ASP.NET WebForms con OCR.
         """
+        if manual_captcha is not None:
+            try:
+                return self._login_legacy(username, password, manual_captcha, captcha_id)
+            except requests.RequestException:
+                return self._login_error("service_unavailable", "No se pudo conectar con UPAO. Inténtalo nuevamente en unos minutos.")
         print(f"[Scraper] Intentando inicio de sesión vía Banner SSB SSO para usuario: {username}")
         success, msg, session = banner_sso_service.login_sso(username, password)
 
@@ -39,8 +49,33 @@ class CampusScraperService:
                 "message": "Login SSO exitoso sin captcha."
             }
 
-        print(f"[Scraper] SSO falló ('{msg}'). Intentando fallback legado ASP.NET WebForms con OCR...")
-        return self._login_legacy(username, password, manual_captcha)
+        if msg == "invalid_credentials" or any(word in msg.lower() for word in ("incorrect", "credenciales", "inválid", "invalid")):
+            return self._login_error("invalid_credentials", "ID o contraseña incorrectos. Revisa tus datos.")
+        print("[Scraper] SSO no disponible. Intentando portal alternativo.")
+        try:
+            return self._login_legacy(username, password)
+        except requests.RequestException:
+            return self._login_error("service_unavailable", "No se pudo conectar con UPAO. Inténtalo nuevamente en unos minutos.")
+
+    @staticmethod
+    def _login_error(code: str, message: str) -> dict:
+        return {"success": False, "necesita_captcha": False, "error_code": code, "message": message}
+
+    def _captcha_response(self, username, session, form_fields, captcha_bytes):
+        challenge_id = secrets.token_urlsafe(24)
+        with self._captcha_lock:
+            now = time.monotonic()
+            for key, challenge in list(self._captcha_challenges.items()):
+                if challenge[3] <= now:
+                    self._captcha_challenges.pop(key)[1].close()
+            # Bound memory even when the alternate portal is unavailable for a long time.
+            if len(self._captcha_challenges) >= 100:
+                oldest = next(iter(self._captcha_challenges))
+                self._captcha_challenges.pop(oldest)[1].close()
+            self._captcha_challenges[challenge_id] = (username, session, form_fields, now + 300)
+        return {"success": False, "necesita_captcha": True, "error_code": "captcha_required",
+                "captcha_id": challenge_id, "imagen_base64": base64.b64encode(captcha_bytes).decode(),
+                "message": "Ingresa el código de la imagen para continuar."}
 
     def _sesion_sigue_valida(self, session: requests.Session) -> bool:
         """
@@ -88,21 +123,26 @@ class CampusScraperService:
         print(f"[Scraper] Login completo falló para {username}: {result.get('message')}")
         return None, None
 
-    def _login_legacy(self, username: str, password: str, manual_captcha: str | None = None) -> dict:
-        session, form_fields, captcha_bytes = self.initialize_login_session()
+    def _login_legacy(self, username: str, password: str, manual_captcha: str | None = None, captcha_id: str | None = None) -> dict:
+        if manual_captcha is not None:
+            with self._captcha_lock:
+                challenge = self._captcha_challenges.pop(captcha_id, None)
+            if challenge is None:
+                return self._login_error("captcha_expired", "El código de verificación venció. Inicia sesión nuevamente.")
+            owner, session, form_fields, expires_at = challenge
+            if owner != username or expires_at <= time.monotonic():
+                session.close()
+                return self._login_error("captcha_expired", "El código de verificación venció. Inicia sesión nuevamente.")
+            captcha_bytes = b""
+        else:
+            session, form_fields, captcha_bytes = self.initialize_login_session()
         
         captcha_code = manual_captcha
         if not captcha_code:
             captcha_code = process_captcha_ocr(captcha_bytes)
             
         if not captcha_code:
-            img_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
-            return {
-                "success": False,
-                "necesita_captcha": True,
-                "imagen_base64": img_b64,
-                "message": "No se pudo reconocer el captcha automáticamente. Ingrese el código manualmente."
-            }
+            return self._captcha_response(username, session, form_fields, captcha_bytes)
 
         payload = {
             **form_fields,
@@ -113,6 +153,7 @@ class CampusScraperService:
         }
         
         post_res = session.post(self.login_url, data=payload, timeout=30)
+        post_res.raise_for_status()
         
         if "login.aspx" not in post_res.url and post_res.status_code == 200:
             token = _token_para(username)
@@ -123,19 +164,8 @@ class CampusScraperService:
                 "necesita_captcha": False,
                 "message": "Login legado exitoso."
             }
-        else:
-            try:
-                fresh_captcha = session.get(self.captcha_url, headers={"Referer": self.login_url}, timeout=30).content
-                fresh_b64 = base64.b64encode(fresh_captcha).decode("utf-8")
-            except Exception:
-                fresh_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
-
-            return {
-                "success": False,
-                "necesita_captcha": True,
-                "imagen_base64": fresh_b64,
-                "message": "Código o credenciales incorrectos."
-            }
+        session.close()
+        return self._login_error("invalid_credentials", "ID, contraseña o código incorrectos. Revisa tus datos.")
 
     def initialize_login_session(self) -> tuple[requests.Session, dict, bytes]:
         session = requests.Session()
@@ -144,6 +174,7 @@ class CampusScraperService:
         })
         
         response = session.get(self.login_url, timeout=30)
+        response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
         
         viewstate = soup.find("input", {"id": "__VIEWSTATE"})

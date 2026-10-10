@@ -45,3 +45,23 @@ ni tokens en los logs modificados.
 No se cambió la interfaz, la fórmula de notas ni la integración con Canvas.
 Las pruebas locales no sustituyen una comprobación en un teléfono y con Banner
 real antes de publicar.
+
+## Correcciones de inicio de sesión
+
+Los rechazos explícitos del SSO devuelven `error_code=invalid_credentials` y
+`necesita_captcha=false`. Solo se intenta el portal alternativo cuando el SSO
+no está disponible. Las redirecciones inesperadas ya no se consideran un login
+correcto. Se distinguen las credenciales incorrectas de los fallos de conexión.
+
+Un captcha auténtico incluye `captcha_id`; la app lo devuelve a
+`/login/confirmar-captcha` junto con el código. El backend conserva durante cinco
+minutos la misma sesión y los campos ocultos que generaron la imagen. El reto
+es de un solo uso y pertenece a una cuenta. Si el backend se reinicia durante
+ese paso, el usuario debe iniciar el login nuevamente.
+
+La app centraliza los mensajes de error y la renovación de sesión. El worker
+ya no repite los reintentos de login del interceptor. Las ejecuciones simultáneas
+se evitan y los snapshots de notificaciones se separan por cuenta. La primera
+revisión después de esta actualización establece una nueva base de comparación.
+Cerrar sesión ya no selecciona automáticamente la primera cuenta guardada al
+reabrir la app; los controles de guardar contraseña y mantener sesión se respetan.

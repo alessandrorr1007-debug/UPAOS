@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 TEST_DIRECTORY = tempfile.TemporaryDirectory()
 os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(TEST_DIRECTORY.name, "security.db")
@@ -127,6 +127,78 @@ class SecurityTests(unittest.TestCase):
         _migrate_legacy_encryption()
         with SessionLocal() as db:
             self.assertEqual(decrypt_password(db.get(UserSetting, "000000002").password_encriptada), "legacy-password")
+
+    def test_incorrect_credentials_never_trigger_captcha_or_legacy_login(self):
+        with patch.object(main.banner_sso_service, "login_sso", return_value=(False, "invalid_credentials", None)), patch.object(scraper_service, "_login_legacy") as legacy:
+            response = self.client.post("/login", json={"usuario": "000000001", "password": "wrong"})
+        self.assertFalse(response.json()["success"])
+        self.assertFalse(response.json()["necesita_captcha"])
+        self.assertEqual(response.json()["error_code"], "invalid_credentials")
+        self.assertIn("ID o contraseña incorrectos", response.json()["message"])
+        legacy.assert_not_called()
+
+    def test_malformed_credentials_are_rejected_before_contacting_upao(self):
+        with patch.object(scraper_service, "login") as login:
+            for usuario, password in [("123", "password"), ("abcdefghi", "password"), ("000000001", "")]:
+                response = self.client.post("/login", json={"usuario": usuario, "password": password})
+                self.assertEqual(response.status_code, 422)
+            login.assert_not_called()
+
+    def test_outage_is_not_reported_as_incorrect_credentials(self):
+        with patch.object(main.banner_sso_service, "login_sso", return_value=(False, "service_unavailable", None)), patch.object(scraper_service, "initialize_login_session", side_effect=requests.Timeout):
+            result = scraper_service.login("000000001", "test-pass")
+        self.assertEqual(result["error_code"], "service_unavailable")
+        self.assertFalse(result["necesita_captcha"])
+
+    def test_sso_wrong_password_and_unknown_redirect_are_not_success(self):
+        initial = Mock(url="https://upaosso.upao.edu.pe:410/Account/Login", text='<form action="/Account/Login"><input name="id_usuario"><input name="nip"></form>')
+        for url, status, expected in [("https://upaosso.upao.edu.pe:410/Account/Login?is_error=true&mensaje_error=Credenciales%20incorrectas", 200, "invalid_credentials"),
+                                      ("https://example.org/unexpected", 200, "service_unavailable"),
+                                      ("https://upaosso.upao.edu.pe:410/Account/Login", 401, "invalid_credentials")]:
+            session = Mock()
+            session.get.return_value = initial
+            session.post.return_value = Mock(url=url, status_code=status)
+            with self.subTest(url=url), patch("services.banner_sso_service.requests.Session", return_value=session):
+                success, message, authenticated = main.banner_sso_service.login_sso("000000001", "wrong")
+                self.assertFalse(success)
+                self.assertEqual(message, expected)
+                self.assertIsNone(authenticated)
+                session.close.assert_called_once()
+
+    def test_manual_captcha_reuses_original_session_and_hidden_fields(self):
+        session = Mock()
+        session.post.return_value = Mock(url="https://campusvirtual.upao.edu.pe/inicio.aspx", status_code=200)
+        with patch.object(main.banner_sso_service, "login_sso", return_value=(False, "service_unavailable", None)) as sso, patch.object(scraper_service, "initialize_login_session", return_value=(session, {"__VIEWSTATE": "original-state"}, b"image")), patch("services.scraper_service.process_captcha_ocr", return_value=None):
+            first = scraper_service.login("000000001", "test-pass")
+            second = self.client.post("/login/confirmar-captcha", json={"usuario": "000000001", "password": "test-pass", "codigo_manual": "ABC123", "captcha_id": first["captcha_id"]})
+        self.assertTrue(second.json()["success"])
+        self.assertEqual(sso.call_count, 1)
+        self.assertEqual(session.post.call_args.kwargs["data"]["__VIEWSTATE"], "original-state")
+        self.assertEqual(session.post.call_args.kwargs["data"]["txtCaptcha"], "ABC123")
+        replay = scraper_service.login("000000001", "test-pass", "ABC123", first["captcha_id"])
+        self.assertEqual(replay["error_code"], "captcha_expired")
+
+    def test_captcha_cannot_be_used_for_another_account(self):
+        session = Mock()
+        first = scraper_service._captcha_response("000000001", session, {}, b"image")
+        result = scraper_service.login("000000002", "test-pass", "ABC123", first["captcha_id"])
+        self.assertEqual(result["error_code"], "captcha_expired")
+        session.post.assert_not_called()
+
+    def test_banner_query_failure_does_not_repeat_login_with_valid_session(self):
+        session = requests.Session()
+        with patch.object(main, "_sesion_garantizada", return_value=session), patch.object(scraper_service, "_sesion_sigue_valida", return_value=True), patch.object(main, "_renovar_sesion") as renew:
+            with SessionLocal() as db, self.assertRaises(main.HTTPException) as error:
+                main._llamar_banner(self.token, db, lambda _: {"success": False, "message": "Periodo no disponible"})
+        self.assertEqual(error.exception.status_code, 400)
+        renew.assert_not_called()
+
+    def test_period_list_recovers_after_backend_restart(self):
+        ACTIVE_SESSIONS.pop(self.token, None)
+        with patch.object(main.banner_sso_service, "login_sso", return_value=(True, "ok", requests.Session())), patch.object(main.banner_sso_service, "get_periodos", return_value={"success": True, "periodos": [{"code": "202610"}]}):
+            response = self.client.get("/notas/periodos", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["periodos"], ["202610"])
 
 
 if __name__ == "__main__":

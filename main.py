@@ -67,13 +67,12 @@ async def log_requests(request: Request, call_next):
         )
 
 class LoginRequest(BaseModel):
-    usuario: str = Field(..., description="ID/Usuario de 9 dígitos del campus")
-    password: str = Field(..., description="Contraseña del usuario")
+    usuario: str = Field(..., pattern=r"^[0-9]{9}$", description="ID/Usuario de 9 dígitos del campus")
+    password: str = Field(..., min_length=1, description="Contraseña del usuario")
 
-class ManualCaptchaRequest(BaseModel):
-    usuario: str
-    password: str
-    codigo_manual: str
+class ManualCaptchaRequest(LoginRequest):
+    codigo_manual: str = Field(..., min_length=1, max_length=32)
+    captcha_id: str | None = None
 
 class NotasBuscarRequest(BaseModel):
     periodo: str = Field(default="202610")
@@ -101,9 +100,8 @@ class RankingOptinRequest(BaseModel):
     usuario: str
     enabled: bool
 
-class AdminLoginRequest(BaseModel):
-    usuario: str
-    password: str
+class AdminLoginRequest(LoginRequest):
+    pass
 
 class AdminSemanaRequest(BaseModel):
     fecha_inicio: str
@@ -183,6 +181,10 @@ def _llamar_banner(token: str, db: Session, func, *args):
     if result.get("success"):
         return result
 
+    # A failed query with a valid session is not an authentication failure.
+    if scraper_service._sesion_sigue_valida(session):
+        raise HTTPException(status_code=400, detail=result.get("message", "Error al consultar Banner"))
+
     user = _usuario_db_de_token(token, db)
     if user is not None and _renovar_sesion(token, user):
         session = ACTIVE_SESSIONS.get(token)
@@ -253,63 +255,37 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Credenciales de administrador inválidas")
 
     result = scraper_service.login(req.usuario, req.password)
+    return _finalizar_login(req, result, db)
+
+
+def _finalizar_login(req: LoginRequest | ManualCaptchaRequest, result: dict, db: Session):
     if result.get("success"):
         result["es_admin"] = False
-        existing_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
-        if not existing_user:
-            existing_user = UserSetting(
-                usuario_campus=req.usuario,
-                password_encriptada=encrypt_password(req.password),
-                auto_check_enabled=False
-            )
-            db.add(existing_user)
-        else:
-            existing_user.password_encriptada = encrypt_password(req.password)
-        if existing_user.fecha_primer_login is None:
-            existing_user.fecha_primer_login = datetime.now()
-        if not existing_user.nombre:
-            existing_user.nombre = features_service.extraer_nombre_estudiante(
-                ACTIVE_SESSIONS.get(result.get("token"))
-            )
+        user = db.get(UserSetting, req.usuario)
+        if user is None:
+            user = UserSetting(usuario_campus=req.usuario, auto_check_enabled=False)
+            db.add(user)
+        user.password_encriptada = encrypt_password(req.password)
+        if user.fecha_primer_login is None:
+            user.fecha_primer_login = datetime.now()
+        if not user.nombre:
+            user.nombre = features_service.extraer_nombre_estudiante(ACTIVE_SESSIONS.get(result.get("token")))
         db.commit()
         features_service.registrar_actividad(db, req.usuario)
-    print(f"[Login] success={bool(result.get('success'))}")
     return result
+
 
 @app.post("/login/confirmar-captcha")
 def login_confirmar_captcha(req: ManualCaptchaRequest, db: Session = Depends(get_db)):
-    result = scraper_service.login(req.usuario, req.password, manual_captcha=req.codigo_manual)
-    if result.get("success"):
-        existing_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
-        if not existing_user:
-            existing_user = UserSetting(
-                usuario_campus=req.usuario,
-                password_encriptada=encrypt_password(req.password),
-                auto_check_enabled=False
-            )
-            db.add(existing_user)
-        else:
-            existing_user.password_encriptada = encrypt_password(req.password)
-        if existing_user.fecha_primer_login is None:
-            existing_user.fecha_primer_login = datetime.now()
-        if not existing_user.nombre:
-            existing_user.nombre = features_service.extraer_nombre_estudiante(
-                ACTIVE_SESSIONS.get(result.get("token"))
-            )
-        db.commit()
-        features_service.registrar_actividad(db, req.usuario)
-    return result
+    result = scraper_service.login(req.usuario, req.password, manual_captcha=req.codigo_manual, captcha_id=req.captcha_id)
+    return _finalizar_login(req, result, db)
 
 @app.get("/notas/periodos")
-def get_periodos(authorization: str | None = Header(None, alias="Authorization")):
+def get_periodos(authorization: str | None = Header(None, alias="Authorization"), db: Session = Depends(get_db)):
     print("[GET /notas/periodos]")
-    session = None
-    if authorization:
-        token = authorization.replace("Bearer ", "").strip()
-        session = ACTIVE_SESSIONS.get(token)
-
-    if session:
-        banner_res = banner_sso_service.get_periodos(session)
+    token = (authorization or "").replace("Bearer ", "").strip()
+    if _usuario_de_token(token) != features_service.ADMIN_USUARIO:
+        banner_res = _llamar_banner(token, db, lambda session: banner_sso_service.get_periodos(session))
         if banner_res.get("success"):
             raw_periodos = banner_res.get("periodos", [])
             periodos_str_list = [p.get("code") for p in raw_periodos if p.get("code")]
@@ -327,15 +303,11 @@ def get_periodos(authorization: str | None = Header(None, alias="Authorization")
     }
 
 @app.get("/notas/carreras")
-def get_carreras(term: str = "202610", authorization: str | None = Header(None, alias="Authorization")):
+def get_carreras(term: str = "202610", authorization: str | None = Header(None, alias="Authorization"), db: Session = Depends(get_db)):
     print(f"[GET /notas/carreras] Term: {term}")
-    session = None
-    if authorization:
-        token = authorization.replace("Bearer ", "").strip()
-        session = ACTIVE_SESSIONS.get(token)
-
-    if session:
-        banner_res = banner_sso_service.get_niveles(session, term)
+    token = (authorization or "").replace("Bearer ", "").strip()
+    if _usuario_de_token(token) != features_service.ADMIN_USUARIO:
+        banner_res = _llamar_banner(token, db, lambda session: banner_sso_service.get_niveles(session, term))
         if banner_res.get("success"):
             raw_niveles = banner_res.get("niveles", [])
             carreras_str_list = [n.get("code") for n in raw_niveles if n.get("code")]
