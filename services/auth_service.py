@@ -2,7 +2,7 @@
 import hashlib
 import secrets
 from datetime import datetime, timedelta
-from database import AuthSession, SessionLocal
+from database import AuthSession, SessionLocal, UserSetting
 
 
 def issue_token(usuario: str) -> str:
@@ -25,6 +25,6 @@ def token_user(token: str) -> str | None:
         return None
     with SessionLocal() as db:
         row = db.get(AuthSession, _digest(token))
-        if row is None or row.expires_at <= datetime.utcnow():
+        if row is None or row.expires_at <= datetime.utcnow() or db.get(UserSetting, row.usuario) is None:
             return None
         return row.usuario

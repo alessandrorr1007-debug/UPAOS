@@ -1,3 +1,4 @@
+from services.account_data_lock import account_lock
 import json
 import traceback
 from datetime import datetime
@@ -197,18 +198,26 @@ def run_auto_check():
                 if snapshot is None:
                     continue
 
-                user.ultimo_snapshot_notas = json.dumps(snapshot)
-                user.ultima_revision = datetime.now()
-                db.commit()
+                usuario = user.usuario_campus
+                with account_lock(usuario):
+                    # Discard results downloaded for a deleted account.
+                    db.expire_all()
+                    current = db.query(UserSetting).filter_by(usuario_campus=usuario).first()
+                    if current is None:
+                        continue
+                    user = current
+                    user.ultimo_snapshot_notas = json.dumps(snapshot)
+                    user.ultima_revision = datetime.now()
+                    db.commit()
 
-                if user.ranking_optin:
-                    features_service.registrar_snapshot_ranking(db, user.usuario_campus, term, snapshot)
+                    if user.ranking_optin:
+                        features_service.registrar_snapshot_ranking(db, user.usuario_campus, term, snapshot)
 
-                if cambios:
-                    print(f"[AutoCheck] Cambios para {user.usuario_campus}: {[c['mensaje'] for c in cambios]}")
-                    notificar_cambios(db, user, cambios)
-                else:
-                    print(f"[AutoCheck] Sin cambios para {user.usuario_campus}.")
+                    if cambios:
+                        print(f"[AutoCheck] Cambios para {user.usuario_campus}: {[c['mensaje'] for c in cambios]}")
+                        notificar_cambios(db, user, cambios)
+                    else:
+                        print(f"[AutoCheck] Sin cambios para {user.usuario_campus}.")
             except Exception as e:
                 print(f"[AutoCheck] Error procesando {user.usuario_campus}: {e}")
                 print(traceback.format_exc())

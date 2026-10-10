@@ -29,10 +29,10 @@ db.close()
 r = client.get("/semana")
 check("semana configurada", r.status_code == 200 and r.json()["configurada"] is True, r.json()["etiqueta"])
 
-# 3. cuenta inexistente -> 404
+# 3. Una sesión de una cuenta inexistente o eliminada no es válida.
 client.headers["Authorization"] = "Bearer " + issue_token("999999999")
 r = client.get("/cuenta", params={"usuario": "999999999"})
-check("cuenta 404", r.status_code == 404, str(r.status_code))
+check("cuenta inexistente 401", r.status_code == 401, str(r.status_code))
 
 # 4. crear usuario + /cuenta
 client.headers["Authorization"] = "Bearer " + issue_token("000000001")
@@ -61,10 +61,10 @@ check("anti-spam 400", r.status_code == 400 and "Límite" in r.json()["detail"],
 r = client.get("/sugerencias/mis", params={"usuario": "000000001"})
 check("mis sugerencias 3", r.status_code == 200 and len(r.json()["sugerencias"]) == 3, str(len(r.json()["sugerencias"])))
 
-# 9. ranking optin sin usuario -> 404
+# 9. ranking optin sin usuario -> sesión inválida
 client.headers["Authorization"] = "Bearer " + issue_token("999999999")
 r = client.post("/ranking/optin", json={"usuario": "999999999", "enabled": True})
-check("optin 404", r.status_code == 404, str(r.status_code))
+check("optin sin cuenta 401", r.status_code == 401, str(r.status_code))
 
 # 10. ranking optin on
 client.headers["Authorization"] = "Bearer " + issue_token("000000001")

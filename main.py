@@ -18,6 +18,7 @@ from services.notification_service import notification_service
 from services import auto_check_service
 from services import features_service
 from services.auth_service import issue_token, token_user
+from services.account_data_lock import account_lock
 
 
 def _tick_auto_check():
@@ -232,7 +233,7 @@ def healthz():
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     print(f"[Login Request] Usuario: {req.usuario}")
-    
+
     # Login administrativo independiente del portal universitario.
     if req.usuario == features_service.ADMIN_USUARIO:
         features_service.asegurar_admin(db)
@@ -509,7 +510,7 @@ def update_device_token(req: DeviceTokenRequest, usuario: str, db: Session = Dep
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     user.fcm_token = req.fcm_token
     db.commit()
-    
+
     if req.fcm_token and notification_service.initialized:
         notification_service.send_push_notification(
             token=req.fcm_token,
@@ -529,16 +530,21 @@ def actualizar_ahora(usuario: str, db: Session = Depends(get_db)):
     if snapshot is None:
         return {"success": False, "message": "No se pudo obtener una sesión válida de Banner ni el periodo actual."}
 
-    user.ultimo_snapshot_notas = json.dumps(snapshot)
-    user.ultima_revision = datetime.now()
-    db.commit()
+    with account_lock(usuario):
+        db.expire_all()
+        user = db.get(UserSetting, usuario)
+        if user is None:
+            raise HTTPException(status_code=404, detail="La cuenta fue eliminada")
+        user.ultimo_snapshot_notas = json.dumps(snapshot)
+        user.ultima_revision = datetime.now()
+        db.commit()
 
-    features_service.registrar_actividad(db, user.usuario_campus)
-    if user.ranking_optin:
-        features_service.registrar_snapshot_ranking(db, user.usuario_campus, term, snapshot)
+        features_service.registrar_actividad(db, user.usuario_campus)
+        if user.ranking_optin:
+            features_service.registrar_snapshot_ranking(db, user.usuario_campus, term, snapshot)
 
-    if cambios:
-        auto_check_service.notificar_cambios(db, user, cambios)
+        if cambios:
+            auto_check_service.notificar_cambios(db, user, cambios)
 
     return {
         "success": True,
@@ -637,6 +643,35 @@ def cuenta(usuario: str, db: Session = Depends(get_db)):
     return perfil
 
 # ---------------------------------------------------------------------------
+@app.delete("/cuenta/datos")
+def eliminar_datos_cuenta(usuario: str, db: Session = Depends(get_db)):
+    """Elimina únicamente los datos propios de UPAO S y revoca sus sesiones."""
+    from database import (AuthSession, Sugerencia, CourseGradeAnon,
+                          PeriodoPromedioHistorial, DailyActivity, RequestLog)
+    from services.auth_service import _digest
+    from services.scraper_service import USER_SESSION_TOKENS
+
+    with account_lock(usuario):
+        user = db.get(UserSetting, usuario)
+        if user is not None and user.is_admin:
+            raise HTTPException(status_code=403, detail="No se puede eliminar la cuenta de administración")
+        hashes = {row.token_hash for row in db.query(AuthSession).filter_by(usuario=usuario).all()}
+        for model in (Notificacion, Sugerencia, CourseGradeAnon, PeriodoPromedioHistorial, DailyActivity, RequestLog):
+            db.query(model).filter(model.usuario_banner == usuario).delete(synchronize_session=False)
+        db.query(AuthSession).filter_by(usuario=usuario).delete(synchronize_session=False)
+        db.query(UserSetting).filter_by(usuario_campus=usuario).delete(synchronize_session=False)
+        db.commit()
+        for token in list(ACTIVE_SESSIONS):
+            if _digest(token) in hashes:
+                ACTIVE_SESSIONS.pop(token, None)
+        USER_SESSION_TOKENS.pop(usuario, None)
+        with scraper_service._captcha_lock:
+            for challenge_id, challenge in list(scraper_service._captcha_challenges.items()):
+                if challenge[0] == usuario:
+                    scraper_service._captcha_challenges.pop(challenge_id, None)
+                    challenge[1].close()
+    return {"success": True}
+
 # Panel Admin 2.1 - 2.4 (rutas protegidas para administración)
 # ---------------------------------------------------------------------------
 

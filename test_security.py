@@ -65,7 +65,7 @@ class SecurityTests(unittest.TestCase):
                 self.assertEqual(self.client.request(method, path, json={}).status_code, 401)
 
     def test_cross_account_reads_and_writes_are_rejected(self):
-        cases = [("GET", "/cuenta", None), ("GET", "/notificaciones", None),
+        cases = [("DELETE", "/cuenta/datos", None), ("GET", "/cuenta", None), ("GET", "/notificaciones", None),
                  ("PATCH", "/settings/auto-check", {"enabled": True}),
                  ("POST", "/device-token", {"fcm_token": "other-device"}),
                  ("POST", "/notas/actualizar-ahora", None)]
@@ -82,6 +82,63 @@ class SecurityTests(unittest.TestCase):
         response = self.client.get("/notificaciones", params={"usuario": "000000001"}, headers=self.headers)
         self.assertEqual(response.json(), {"no_leidas": 0, "total": 0, "notificaciones": []})
         self.assertEqual(self.client.post("/sugerencias", json={"usuario": "000000001", "texto": "Una sugerencia válida para la app"}, headers=self.headers).status_code, 200)
+
+    def test_delete_removes_all_own_records_and_revokes_all_sessions(self):
+        from database import Notificacion, Sugerencia, CourseGradeAnon, PeriodoPromedioHistorial, DailyActivity, RequestLog
+        from services.scraper_service import USER_SESSION_TOKENS
+        usuario = "000000099"
+        models = (Notificacion, Sugerencia, CourseGradeAnon, PeriodoPromedioHistorial, DailyActivity, RequestLog)
+        with SessionLocal() as db:
+            db.add(UserSetting(usuario_campus=usuario, password_encriptada=encrypt_password("pass")))
+            db.add_all([Notificacion(usuario_banner=usuario, mensaje="Nota"), Sugerencia(usuario_banner=usuario, texto="Privada"),
+                        CourseGradeAnon(usuario_banner=usuario, course_id="curso", ciclo="202620"),
+                        PeriodoPromedioHistorial(usuario_banner=usuario, periodo="202620"),
+                        DailyActivity(usuario_banner=usuario, fecha=datetime.now()), RequestLog(usuario_banner=usuario)])
+            db.commit()
+        first, second = issue_token(usuario), issue_token(usuario)
+        ACTIVE_SESSIONS[first] = requests.Session()
+        USER_SESSION_TOKENS[usuario] = first
+        response = self.client.delete("/cuenta/datos", params={"usuario": usuario}, headers={"Authorization": "Bearer " + first})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+        for token in (first, second):
+            self.assertIsNone(token_user(token))
+        with SessionLocal() as db:
+            self.assertIsNone(db.get(UserSetting, usuario))
+            self.assertIsNotNone(db.get(UserSetting, "000000002"))
+            self.assertEqual(db.query(AuthSession).filter_by(usuario=usuario).count(), 0)
+            for model in models:
+                self.assertEqual(db.query(model).filter_by(usuario_banner=usuario).count(), 0)
+        self.assertNotIn(first, ACTIVE_SESSIONS)
+        self.assertNotIn(usuario, USER_SESSION_TOKENS)
+
+    def test_admin_account_cannot_be_deleted(self):
+        usuario = features_service.ADMIN_USUARIO
+        headers = {"Authorization": "Bearer " + issue_token(usuario)}
+        self.assertEqual(self.client.delete("/cuenta/datos", params={"usuario": usuario}, headers=headers).status_code, 403)
+
+    def test_background_results_cannot_restore_a_deleted_account(self):
+        from database import Notificacion, CourseGradeAnon
+        from services import auto_check_service
+        usuario = "000000098"
+        with SessionLocal() as db:
+            db.add(UserSetting(usuario_campus=usuario, password_encriptada=encrypt_password("pass"), auto_check_enabled=True, ranking_optin=True))
+            db.commit()
+        headers = {"Authorization": "Bearer " + issue_token(usuario)}
+
+        def review(user):
+            if user.usuario_campus != usuario:
+                return [], None, None
+            response = self.client.delete("/cuenta/datos", params={"usuario": usuario}, headers=headers)
+            self.assertEqual(response.status_code, 200)
+            return [{"mensaje": "Nota nueva"}], [{"course_id": "curso", "curso": "Prueba", "nota_actual": 20}], "202620"
+
+        with patch.object(auto_check_service, "revisar_usuario", side_effect=review):
+            auto_check_service.run_auto_check()
+        with SessionLocal() as db:
+            self.assertIsNone(db.get(UserSetting, usuario))
+            self.assertEqual(db.query(Notificacion).filter_by(usuario_banner=usuario).count(), 0)
+            self.assertEqual(db.query(CourseGradeAnon).filter_by(usuario_banner=usuario).count(), 0)
 
     def test_admin_login_and_permissions(self):
         response = self.client.post("/admin/login", json={"usuario": features_service.ADMIN_USUARIO, "password": "test-only-admin-password"})
