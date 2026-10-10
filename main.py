@@ -575,7 +575,7 @@ def get_notificaciones(usuario: str, db: Session = Depends(get_db)):
                 "mensaje": n.mensaje,
                 "curso": n.curso,
                 "componente": n.componente,
-                "fecha_creacion": n.fecha_creacion.isoformat() if n.fecha_creacion else None,
+                "fecha_creacion": n.fecha_creacion.astimezone().isoformat() if n.fecha_creacion else None,
                 "leida": bool(n.leida),
             }
             for n in filas

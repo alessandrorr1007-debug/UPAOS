@@ -117,6 +117,25 @@ class SecurityTests(unittest.TestCase):
         headers = {"Authorization": "Bearer " + issue_token(usuario)}
         self.assertEqual(self.client.delete("/cuenta/datos", params={"usuario": usuario}, headers=headers).status_code, 403)
 
+    def test_notification_dates_include_server_timezone(self):
+        from database import Notificacion
+        original = datetime(2026, 10, 10, 23, 30, 0, 123456)
+        with SessionLocal() as db:
+            notice = Notificacion(usuario_banner="000000001", mensaje="Fecha de prueba", fecha_creacion=original)
+            db.add(notice)
+            db.commit()
+            notice_id = notice.id
+        try:
+            response = self.client.get("/notificaciones", params={"usuario": "000000001"}, headers=self.headers)
+            notice = next(item for item in response.json()["notificaciones"] if item["id"] == notice_id)
+            parsed = datetime.fromisoformat(notice["fecha_creacion"])
+            self.assertIsNotNone(parsed.tzinfo)
+            self.assertEqual(original, parsed.astimezone().replace(tzinfo=None))
+        finally:
+            with SessionLocal() as db:
+                db.query(Notificacion).filter_by(id=notice_id).delete()
+                db.commit()
+
     def test_background_results_cannot_restore_a_deleted_account(self):
         from database import Notificacion, CourseGradeAnon
         from services import auto_check_service
