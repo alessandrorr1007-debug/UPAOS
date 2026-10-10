@@ -1,19 +1,46 @@
 import json
+import os
+from pathlib import Path
 from datetime import datetime
 from cryptography.fernet import Fernet
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.engine import make_url
 from config import settings
 
-engine = create_engine(settings.DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(settings.DATABASE_URL, connect_args={"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+def _encryption_key():
+    if settings.FERNET_KEY:
+        return settings.FERNET_KEY.encode()
+    if not settings.DATABASE_URL.startswith("sqlite"):
+        raise RuntimeError("Configure FERNET_KEY para esta base de datos")
+    database_path = make_url(settings.DATABASE_URL).database
+    key_path = Path(database_path or "app_data.db").with_suffix(".fernet.key")
+    try:
+        descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return key_path.read_bytes()
+    with os.fdopen(descriptor, "wb") as key_file:
+        key = Fernet.generate_key()
+        key_file.write(key)
+    return key
+
+
 try:
-    cipher_suite = Fernet(settings.FERNET_KEY.encode())
+    cipher_suite = Fernet(_encryption_key())
 except Exception:
-    key = Fernet.generate_key()
-    cipher_suite = Fernet(key)
+    raise RuntimeError("FERNET_KEY inválida: configure la clave original para conservar las credenciales") from None
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    token_hash = Column(String(64), primary_key=True)
+    usuario = Column(String, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
 
 class UserSetting(Base):
     __tablename__ = "user_settings"
@@ -137,6 +164,29 @@ def _migrate_missing_columns():
         print(f"[DB Warning] No se pudieron migrar columnas: {e}")
 
 _migrate_missing_columns()
+
+
+def _migrate_legacy_encryption():
+    # Upgrade databases that used the former public default key without losing accounts.
+    if settings.FERNET_KEY:
+        return
+    legacy = Fernet(b"AekYrdvES-txYMoPb6t1YiBMEyoE26ZmrwgJOTiMv3Q=")
+    with SessionLocal() as db:
+        for user in db.query(UserSetting).all():
+            if not user.password_encriptada:
+                continue
+            try:
+                cipher_suite.decrypt(user.password_encriptada.encode())
+            except Exception:
+                try:
+                    plain = legacy.decrypt(user.password_encriptada.encode())
+                except Exception:
+                    continue
+                user.password_encriptada = cipher_suite.encrypt(plain).decode()
+        db.commit()
+
+
+_migrate_legacy_encryption()
 
 def encrypt_password(plain_password: str) -> str:
     return cipher_suite.encrypt(plain_password.encode()).decode()

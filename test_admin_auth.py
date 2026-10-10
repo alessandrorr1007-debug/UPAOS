@@ -1,11 +1,14 @@
 import os
 import tempfile
 
+os.environ["ADMIN_PASSWORD"] = "test-only-admin-password"
+
 os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(tempfile.mkdtemp(), "test_admin_auth.db")
 
 import main
 from database import SessionLocal, UserSetting
 from services import features_service
+from services.auth_service import issue_token
 from fastapi.testclient import TestClient
 
 client = TestClient(main.app)
@@ -18,12 +21,13 @@ if db.query(UserSetting).filter(UserSetting.usuario_campus == "000000001").first
 db.commit()
 db.close()
 
-ADMIN_TOKEN = "sess_000000000_admin"
-STUDENT_TOKEN = "sess_000000001_abcdef"
+ADMIN_TOKEN = issue_token("000000000")
+STUDENT_TOKEN = issue_token("000000001")
 NO_TOKEN = ""
 
 def check(name, cond, extra=""):
-    print(("OK " if cond else "FAIL ") + name + (" | " + extra if extra else ""))
+    assert cond, name + " | " + extra
+    print("OK " + name)
 
 # 1. Sin token -> 401
 for path, method in [
@@ -69,7 +73,7 @@ r = client.post("/admin/semana", json={"fecha_inicio": "2026-03-02"}, params={"a
 check("semana admin -> 200", r.status_code == 200, str(r.json()))
 
 # 7. /admin/login devuelve token uniforme sess_
-r = client.post("/admin/login", json={"usuario": "000000000", "password": "Paul2002"})
+r = client.post("/admin/login", json={"usuario": "000000000", "password": "test-only-admin-password"})
 check("admin/login token sess_", r.status_code == 200 and r.json()["token"].startswith("sess_"), str(r.json()))
 
 print("AUTH DONE")

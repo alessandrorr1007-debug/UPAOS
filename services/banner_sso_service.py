@@ -63,7 +63,7 @@ class BannerSSOService:
             payload.pop("password", None)
 
             verification_token = payload.get("__RequestVerificationToken")
-            print(f"[SSO Log] Token __RequestVerificationToken extraído: {verification_token[:25]}..." if verification_token else "[SSO Warning] Token __RequestVerificationToken no encontrado")
+            print("[SSO Log] Verificación de formulario encontrada" if verification_token else "[SSO Warning] Verificación de formulario no encontrada")
 
             print(f"[SSO Log] Enviando POST a: {action_url} con campos: {list(payload.keys())}")
 

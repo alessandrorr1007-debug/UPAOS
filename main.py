@@ -17,6 +17,7 @@ from services.banner_sso_service import banner_sso_service
 from services.notification_service import notification_service
 from services import auto_check_service
 from services import features_service
+from services.auth_service import issue_token, token_user
 
 
 def _tick_auto_check():
@@ -41,7 +42,8 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     print("[Scheduler] Job auto_check iniciado (cada 5 min, respeta el intervalo por usuario).")
     try:
-        features_service.asegurar_admin(SessionLocal())
+        with SessionLocal() as db:
+            features_service.asegurar_admin(db)
     except Exception as e:
         print(f"[Startup] Warning al asegurar cuenta admin: {e}")
     yield
@@ -51,18 +53,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
 @app.middleware("http")
-def log_requests(request: Request, call_next):
-    print(f"\n==================== [PETICIÓN ENTRANTE: {request.method} {request.url}] ====================")
-    print(f"Headers: {dict(request.headers)}")
+async def log_requests(request: Request, call_next):
+    print(f"[HTTP] {request.method} {request.url.path}")
     try:
-        response = call_next(request)
+        response = await call_next(request)
         return response
     except Exception as e:
         print(f"[ERROR EXCEPCIÓN BACKEND]: {e}")
         print(traceback.format_exc())
         return JSONResponse(
             status_code=500,
-            content={"detail": f"Error interno en backend: {str(e)}", "traceback": traceback.format_exc()}
+            content={"detail": "Error interno en backend"}
         )
 
 class LoginRequest(BaseModel):
@@ -112,10 +113,31 @@ class AdminEstadoSugerenciaRequest(BaseModel):
 
 
 def _usuario_de_token(token: str) -> str | None:
-    if not token or not token.startswith("sess_"):
-        return None
-    partes = token.split("_")
-    return partes[1] if len(partes) >= 2 else None
+    return token_user(token)
+
+
+async def _autenticar_peticion(request: Request, authorization: str | None = Header(default=None)):
+    public = {"/", "/healthz", "/login", "/login/confirmar-captcha", "/admin/login", "/semana"}
+    if request.url.path in public:
+        return
+    scheme, _, token = (authorization or "").partition(" ")
+    usuario = token_user(token.strip()) if scheme.lower() == "bearer" else None
+    if usuario is None:
+        raise HTTPException(status_code=401, detail="sesion_expirada")
+    # Preserve existing request contracts, but bind every user field to the session.
+    usuarios = request.query_params.getlist("usuario")
+    if request.method in {"POST", "PATCH", "PUT"}:
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and "usuario" in body:
+            usuarios.append(body["usuario"])
+    if any(value != usuario for value in usuarios):
+        raise HTTPException(status_code=403, detail="Acceso denegado a otra cuenta")
+
+
+app.router.dependencies.append(Depends(_autenticar_peticion))
 
 def _usuario_db_de_token(token: str, db: Session) -> UserSetting | None:
     usuario_id = _usuario_de_token(token)
@@ -136,7 +158,12 @@ def _renovar_sesion(token: str, user: UserSetting | None) -> bool:
     except Exception as e:
         print(f"[Sesion] Excepción en re-login de {user.usuario_campus}: {e}")
         return False
-    return result.get("success") and ACTIVE_SESSIONS.get(token) is not None
+    if result.get("success"):
+        session = ACTIVE_SESSIONS.get(result.get("token"))
+        if session is not None:
+            ACTIVE_SESSIONS[token] = session
+            return True
+    return False
 
 def _sesion_garantizada(token: str, db: Session) -> requests.Session:
     session = ACTIVE_SESSIONS.get(token)
@@ -204,7 +231,7 @@ def healthz():
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     print(f"[Login Request] Usuario: {req.usuario}")
     
-    # Login directo del Administrador (000000000 / Paul2002)
+    # Login administrativo independiente del portal universitario.
     if req.usuario == features_service.ADMIN_USUARIO:
         features_service.asegurar_admin(db)
         admin_user = db.query(UserSetting).filter(UserSetting.usuario_campus == req.usuario).first()
@@ -212,7 +239,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
             admin_user.nombre = "Administrador Sistema"
             admin_user.is_admin = True
             db.commit()
-            token = f"sess_{req.usuario}_admin"
+            token = issue_token(req.usuario)
             ACTIVE_SESSIONS[token] = requests.Session()
             features_service.registrar_actividad(db, req.usuario)
             print(f"[Login Admin Exitoso]: {req.usuario}")
@@ -223,6 +250,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
                 "es_admin": True,
                 "message": "Sesión administrativa iniciada correctamente"
             }
+        raise HTTPException(status_code=401, detail="Credenciales de administrador inválidas")
 
     result = scraper_service.login(req.usuario, req.password)
     if result.get("success"):
@@ -245,7 +273,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
             )
         db.commit()
         features_service.registrar_actividad(db, req.usuario)
-    print(f"[Login Response]: {result}")
+    print(f"[Login] success={bool(result.get('success'))}")
     return result
 
 @app.post("/login/confirmar-captcha")
@@ -274,7 +302,7 @@ def login_confirmar_captcha(req: ManualCaptchaRequest, db: Session = Depends(get
 
 @app.get("/notas/periodos")
 def get_periodos(authorization: str | None = Header(None, alias="Authorization")):
-    print(f"[GET /notas/periodos] Authorization Header recibido: {authorization}")
+    print("[GET /notas/periodos]")
     session = None
     if authorization:
         token = authorization.replace("Bearer ", "").strip()
@@ -300,7 +328,7 @@ def get_periodos(authorization: str | None = Header(None, alias="Authorization")
 
 @app.get("/notas/carreras")
 def get_carreras(term: str = "202610", authorization: str | None = Header(None, alias="Authorization")):
-    print(f"[GET /notas/carreras] Term: {term}, Authorization: {authorization}")
+    print(f"[GET /notas/carreras] Term: {term}")
     session = None
     if authorization:
         token = authorization.replace("Bearer ", "").strip()
@@ -321,7 +349,7 @@ def get_carreras(term: str = "202610", authorization: str | None = Header(None, 
 @app.post("/notas/buscar")
 def buscar_notas(req: NotasBuscarRequest, authorization: str = Header(..., alias="Authorization"), db: Session = Depends(get_db)):
     token = authorization.replace("Bearer ", "").strip()
-    print(f"[POST /notas/buscar] Token: {token[:15]}..., Periodo: {req.periodo}, Nivel: {req.carrera}")
+    print(f"[POST /notas/buscar] Periodo: {req.periodo}, Nivel: {req.carrera}")
 
     # Si es sesión de admin local (sin Banner SSB), devuelve lista vacía de cursos sin error 401
     usuario_token = _usuario_de_token(token)
@@ -422,7 +450,7 @@ def get_promedio_periodo(
     Prioriza pps_oficial si el portal/Cuadro de Mérito está disponible.
     """
     token = authorization.replace("Bearer ", "").strip()
-    print(f"[GET /api/promedio/{periodo}] Token: {token[:15]}...")
+    print(f"[GET /api/promedio/{periodo}]")
 
     result = _llamar_banner(
         token,
@@ -439,7 +467,7 @@ def get_promedio_periodo(
 @app.get("/asistencia")
 def get_asistencia(authorization: str = Header(..., alias="Authorization"), db: Session = Depends(get_db)):
     token = authorization.replace("Bearer ", "").strip()
-    print(f"[GET /asistencia] Token: {token[:15]}...")
+    print("[GET /asistencia]")
 
     usuario_token = _usuario_de_token(token)
     if usuario_token == features_service.ADMIN_USUARIO:
@@ -458,7 +486,7 @@ def get_horario(
     db: Session = Depends(get_db),
 ):
     token = authorization.replace("Bearer ", "").strip()
-    print(f"[GET /horario] Token: {token[:15]}... term: {term}")
+    print(f"[GET /horario] term: {term}")
 
     usuario_token = _usuario_de_token(token)
     if usuario_token == features_service.ADMIN_USUARIO:
@@ -651,7 +679,7 @@ def admin_login(req: AdminLoginRequest, db: Session = Depends(get_db)):
     return {
         "success": True,
         "admin_usuario": user.usuario_campus,
-        "token": f"sess_{user.usuario_campus}_admin"
+        "token": issue_token(user.usuario_campus)
     }
 
 @app.get("/admin/cuentas")

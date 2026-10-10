@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .env
 *.db
+*.fernet.key
 .vscode/
 .idea/
 *-firebase-adminsdk-*.json

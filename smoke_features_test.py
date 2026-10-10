@@ -1,17 +1,22 @@
 import os
 import tempfile
 
+os.environ["ADMIN_PASSWORD"] = "test-only-admin-password"
+
 os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(tempfile.mkdtemp(), "test_features.db")
 
 import main
 from database import SessionLocal, UserSetting
 from services import features_service
+from services.auth_service import issue_token
 from fastapi.testclient import TestClient
 
 client = TestClient(main.app)
+client.headers["Authorization"] = "Bearer " + issue_token("000000001")
 
 def check(name, cond, extra=""):
-    print(("OK " if cond else "FAIL ") + name + (" | " + extra if extra else ""))
+    assert cond, name + " | " + extra
+    print("OK " + name)
 
 # 1. /semana sin configurar
 r = client.get("/semana")
@@ -25,10 +30,12 @@ r = client.get("/semana")
 check("semana configurada", r.status_code == 200 and r.json()["configurada"] is True, r.json()["etiqueta"])
 
 # 3. cuenta inexistente -> 404
+client.headers["Authorization"] = "Bearer " + issue_token("999999999")
 r = client.get("/cuenta", params={"usuario": "999999999"})
 check("cuenta 404", r.status_code == 404, str(r.status_code))
 
 # 4. crear usuario + /cuenta
+client.headers["Authorization"] = "Bearer " + issue_token("000000001")
 db = SessionLocal()
 db.add(UserSetting(usuario_campus="000000001", password_encriptada="x"))
 db.commit()
@@ -55,10 +62,12 @@ r = client.get("/sugerencias/mis", params={"usuario": "000000001"})
 check("mis sugerencias 3", r.status_code == 200 and len(r.json()["sugerencias"]) == 3, str(len(r.json()["sugerencias"])))
 
 # 9. ranking optin sin usuario -> 404
+client.headers["Authorization"] = "Bearer " + issue_token("999999999")
 r = client.post("/ranking/optin", json={"usuario": "999999999", "enabled": True})
 check("optin 404", r.status_code == 404, str(r.status_code))
 
 # 10. ranking optin on
+client.headers["Authorization"] = "Bearer " + issue_token("000000001")
 r = client.post("/ranking/optin", json={"usuario": "000000001", "enabled": True})
 check("optin on", r.status_code == 200 and r.json()["ranking_optin"] is True, str(r.json()))
 
@@ -87,8 +96,10 @@ for i, c in enumerate(cursos):
 db.close()
 
 # 13. ranking con 5 -> posicion de 000000003 (18.0) debe ser 1
+client.headers["Authorization"] = "Bearer " + issue_token("000000003")
 r = client.get("/ranking", params={"usuario": "000000003", "course_id": "HUMA-1185", "ciclo": "202610"})
 check("ranking pos1", r.json()["disponible"] and r.json()["position"] == 1, str(r.json()))
+client.headers["Authorization"] = "Bearer " + issue_token("000000001")
 r = client.get("/ranking", params={"usuario": "000000001", "course_id": "HUMA-1185", "ciclo": "202610"})
 check("ranking 16.5 pos2", r.json()["position"] == 2, str(r.json()))
 

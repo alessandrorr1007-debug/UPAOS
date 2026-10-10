@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from bs4 import BeautifulSoup
 
 import bcrypt
+from config import settings
 from sqlalchemy.orm import Session
 
 from database import (
@@ -24,7 +25,7 @@ SUGERENCIA_MIN_LEN = 10           # 1.1: longitud mínima del texto
 SUGERENCIA_MAX_LEN = 500          # 1.1: longitud máxima del texto
 TOTAL_SEMANAS_CICLO = 16          # 1.3: semanas regulares del ciclo
 ADMIN_USUARIO = "000000000"       # 2.1: cuenta del panel de administración
-ADMIN_PASSWORD_PLAIN = "Paul2002"         # 2.1: password independiente del portal (bcrypt)
+ADMIN_PASSWORD_PLAIN = settings.ADMIN_PASSWORD
 
 
 def normalizar_course_id(codigo_materia, numero_curso) -> str:
@@ -458,6 +459,9 @@ def verificar_password_admin(user: UserSetting, password: str) -> bool:
 def asegurar_admin(db: Session) -> None:
     user = db.query(UserSetting).filter(UserSetting.usuario_campus == ADMIN_USUARIO).first()
     if user is None:
+        if not ADMIN_PASSWORD_PLAIN:
+            print("[Features] Configure ADMIN_PASSWORD para crear la cuenta administrativa.")
+            return
         user = UserSetting(
             usuario_campus=ADMIN_USUARIO,
             password_encriptada="",
@@ -469,6 +473,6 @@ def asegurar_admin(db: Session) -> None:
         print(f"[Features] Cuenta admin creada: {ADMIN_USUARIO}")
     else:
         user.is_admin = True
-        user.admin_password_hash = hash_password_admin(ADMIN_PASSWORD_PLAIN)
-        print(f"[Features] Cuenta admin {ADMIN_USUARIO} actualizada con privilegios y contraseña.")
+        if not user.admin_password_hash and ADMIN_PASSWORD_PLAIN:
+            user.admin_password_hash = hash_password_admin(ADMIN_PASSWORD_PLAIN)
     db.commit()

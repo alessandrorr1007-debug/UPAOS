@@ -4,11 +4,15 @@ from bs4 import BeautifulSoup
 from config import settings
 from services.ocr_service import process_captcha_ocr
 from services.banner_sso_service import banner_sso_service
+from services.auth_service import issue_token
 
 ACTIVE_SESSIONS: dict[str, requests.Session] = {}
+USER_SESSION_TOKENS: dict[str, str] = {}
 
 def _token_para(username: str) -> str:
-    return f"sess_{username}_{base64.b64encode(username.encode()).decode()[:10]}"
+    token = issue_token(username)
+    USER_SESSION_TOKENS[username] = token
+    return token
 
 class CampusScraperService:
     def __init__(self):
@@ -70,7 +74,7 @@ class CampusScraperService:
         Solo si expiró se hace el login completo de nuevo.
         Devuelve (session, token) o (None, None).
         """
-        token = _token_para(username)
+        token = USER_SESSION_TOKENS.get(username)
         session = ACTIVE_SESSIONS.get(token)
         if session is not None and self._sesion_sigue_valida(session):
             print(f"[Scraper] Sesión de {username} reutilizada sin login completo.")
@@ -108,7 +112,7 @@ class CampusScraperService:
             "btnIngresar": "Ingresar"
         }
         
-        post_res = session.post(self.login_url, data=payload)
+        post_res = session.post(self.login_url, data=payload, timeout=30)
         
         if "login.aspx" not in post_res.url and post_res.status_code == 200:
             token = _token_para(username)
@@ -121,7 +125,7 @@ class CampusScraperService:
             }
         else:
             try:
-                fresh_captcha = session.get(self.captcha_url, headers={"Referer": self.login_url}).content
+                fresh_captcha = session.get(self.captcha_url, headers={"Referer": self.login_url}, timeout=30).content
                 fresh_b64 = base64.b64encode(fresh_captcha).decode("utf-8")
             except Exception:
                 fresh_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
@@ -139,7 +143,7 @@ class CampusScraperService:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
         
-        response = session.get(self.login_url)
+        response = session.get(self.login_url, timeout=30)
         soup = BeautifulSoup(response.text, "html.parser")
         
         viewstate = soup.find("input", {"id": "__VIEWSTATE"})
@@ -152,7 +156,7 @@ class CampusScraperService:
             "__VIEWSTATEGENERATOR": viewstategenerator.get("value", "") if viewstategenerator else "",
         }
         
-        captcha_res = session.get(self.captcha_url, headers={"Referer": self.login_url})
+        captcha_res = session.get(self.captcha_url, headers={"Referer": self.login_url}, timeout=30)
         captcha_bytes = captcha_res.content
         
         return session, form_data, captcha_bytes

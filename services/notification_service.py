@@ -51,7 +51,7 @@ class NotificationService:
             print(f"[Firebase Log] Notificación push enviada con éxito. Message ID: {response}")
             return True
         except Exception as e:
-            print(f"[Firebase Error] Error al enviar notificación a token '{token[:15]}...': {e}")
+            print(f"[Firebase Error] Error al enviar notificación: {type(e).__name__}")
             return False
 
 notification_service = NotificationService()
